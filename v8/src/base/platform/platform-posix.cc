@@ -36,10 +36,9 @@
 #include <cmath>
 #include <cstdlib>
 
-#include "src/base/platform/platform-posix.h"
-
 #include "src/base/lazy-instance.h"
 #include "src/base/macros.h"
+#include "src/base/platform/platform-posix.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
 #include "src/base/utils/random-number-generator.h"
@@ -101,8 +100,6 @@ namespace {
 // 0 is never a valid thread id.
 const pthread_t kNoThread = static_cast<pthread_t>(0);
 
-bool g_hard_abort = false;
-
 const char* g_gc_fake_mmap = nullptr;
 
 DEFINE_LAZY_LEAKY_OBJECT_GETTER(RandomNumberGenerator,
@@ -134,7 +131,8 @@ int GetFlagsForMemoryPermission(OS::MemoryPermission access,
                                 PageType page_type) {
   int flags = MAP_ANONYMOUS;
   flags |= (page_type == PageType::kShared) ? MAP_SHARED : MAP_PRIVATE;
-  if (access == OS::MemoryPermission::kNoAccess) {
+  if (access == OS::MemoryPermission::kNoAccess ||
+      access == OS::MemoryPermission::kNoAccessWillJitLater) {
 #if !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX
     flags |= MAP_NORESERVE;
 #endif  // !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX
@@ -147,7 +145,8 @@ int GetFlagsForMemoryPermission(OS::MemoryPermission access,
   // hardened runtime/memory protection is enabled, which is optional (via code
   // signing) on Intel-based Macs but mandatory on Apple silicon ones. See also
   // https://developer.apple.com/documentation/apple-silicon/porting-just-in-time-compilers-to-apple-silicon.
-  if (access == OS::MemoryPermission::kNoAccessWillJitLater) {
+  if (access == OS::MemoryPermission::kNoAccessWillJitLater ||
+      access == OS::MemoryPermission::kReadWriteExecute) {
     flags |= MAP_JIT;
   }
 #endif  // V8_OS_DARWIN
@@ -160,6 +159,12 @@ void* Allocate(void* hint, size_t size, OS::MemoryPermission access,
   int flags = GetFlagsForMemoryPermission(access, page_type);
   void* result = mmap(hint, size, prot, flags, kMmapFd, kMmapFdOffset);
   if (result == MAP_FAILED) return nullptr;
+
+#if V8_OS_LINUX && V8_ENABLE_PRIVATE_MAPPING_FORK_OPTIMIZATION
+  // This is advisory, so we ignore errors.
+  madvise(result, size, MADV_DONTFORK);
+#endif
+
 #if ENABLE_HUGEPAGE
   if (result != nullptr && size >= kHugePageSize) {
     const uintptr_t huge_start =
@@ -245,14 +250,15 @@ bool OS::ArmUsingHardFloat() {
 #endif  // def __arm__
 #endif
 
-void PosixInitializeCommon(bool hard_abort, const char* const gc_fake_mmap) {
-  g_hard_abort = hard_abort;
+void PosixInitializeCommon(AbortMode abort_mode,
+                           const char* const gc_fake_mmap) {
+  g_abort_mode = abort_mode;
   g_gc_fake_mmap = gc_fake_mmap;
 }
 
 #if !V8_OS_FUCHSIA
-void OS::Initialize(bool hard_abort, const char* const gc_fake_mmap) {
-  PosixInitializeCommon(hard_abort, gc_fake_mmap);
+void OS::Initialize(AbortMode abort_mode, const char* const gc_fake_mmap) {
+  PosixInitializeCommon(abort_mode, gc_fake_mmap);
 }
 #endif  // !V8_OS_FUCHSIA
 
@@ -364,9 +370,9 @@ void* OS::GetRandomMmapAddr() {
   // this address for RISC-V. https://github.com/v8-riscv/v8/issues/375
   raw_addr &= 0x3FFFF000;
 #elif V8_TARGET_ARCH_LOONG64
-  // 42 bits of virtual addressing. Truncate to 40 bits to allow kernel chance
-  // to fulfill request.
-  raw_addr &= uint64_t{0xFFFFFF0000};
+  // 40 or 47 bits of virtual addressing. Truncate to 38 bits to allow kernel
+  // chance to fulfill request.
+  raw_addr &= uint64_t{0x3FFFFF0000};
 #else
   raw_addr &= 0x3FFFF000;
 
@@ -535,10 +541,8 @@ bool OS::RecommitPages(void* address, size_t size, MemoryPermission access) {
 #if defined(V8_OS_DARWIN)
   while (madvise(address, size, MADV_FREE_REUSE) == -1 && errno == EAGAIN) {
   }
-  return true;
-#else
-  return SetPermissions(address, size, access);
 #endif  // defined(V8_OS_DARWIN)
+  return true;
 }
 
 // static
@@ -688,8 +692,13 @@ void OS::Sleep(TimeDelta interval) {
 
 
 void OS::Abort() {
-  if (g_hard_abort) {
-    IMMEDIATE_CRASH();
+  switch (g_abort_mode) {
+    case AbortMode::kSoft:
+      _exit(-1);
+    case AbortMode::kHard:
+      IMMEDIATE_CRASH();
+    case AbortMode::kDefault:
+      break;
   }
   // Redirect to std abort to signal abnormal program termination.
   abort();
@@ -843,6 +852,25 @@ int OS::GetUserTime(uint32_t* secs, uint32_t* usecs) {
 }
 #endif
 
+int OS::GetPeakMemoryUsageKb() {
+#if defined(V8_OS_FUCHSIA)
+  // Fuchsia does not implement getrusage()
+  return -1;
+#else
+  struct rusage usage;
+  if (getrusage(RUSAGE_SELF, &usage) < 0) return -1;
+
+#if defined(V8_OS_MACOS) || defined(V8_OS_IOS)
+  constexpr int KB = 1024;
+  // MacOS and iOS ru_maxrss count bytes
+  return static_cast<int>(usage.ru_maxrss / KB);
+#else
+  // Most other cases (at least Linux, IOS, return kilobytes)
+  return static_cast<int>(usage.ru_maxrss);
+#endif  // defined(V8_OS_MACOS) || defined(V8_OS_IOS)
+#endif  // defined(V8_OS_FUCHSIA)
+}
+
 double OS::TimeCurrentMillis() {
   return Time::Now().ToJsTime();
 }
@@ -939,6 +967,7 @@ void OS::PrintError(const char* format, ...) {
   va_start(args, format);
   VPrintError(format, args);
   va_end(args);
+  fflush(stderr);
 }
 
 
@@ -1083,12 +1112,12 @@ class Thread::PlatformData {
 Thread::Thread(const Options& options)
     : data_(new PlatformData),
       stack_size_(options.stack_size()),
+      priority_(options.priority()),
       start_semaphore_(nullptr) {
   const int min_stack_size = static_cast<int>(PTHREAD_STACK_MIN);
   if (stack_size_ > 0) stack_size_ = std::max(stack_size_, min_stack_size);
   set_name(options.name());
 }
-
 
 Thread::~Thread() {
   delete data_;
@@ -1120,7 +1149,6 @@ static void SetThreadName(const char* name) {
 #endif
 }
 
-
 static void* ThreadEntry(void* arg) {
   Thread* thread = reinterpret_cast<Thread*>(arg);
   // We take the lock here to make sure that pthread_create finished first since
@@ -1128,6 +1156,35 @@ static void* ThreadEntry(void* arg) {
   // one).
   { MutexGuard lock_guard(&thread->data()->thread_creation_mutex_); }
   SetThreadName(thread->name());
+#if V8_OS_DARWIN
+  switch (thread->priority()) {
+    case Thread::Priority::kBestEffort:
+      pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+      break;
+    case Thread::Priority::kUserVisible:
+      pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, -1);
+      break;
+    case Thread::Priority::kUserBlocking:
+      pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+      break;
+    case Thread::Priority::kDefault:
+      break;
+  }
+#elif V8_OS_LINUX
+  switch (thread->priority()) {
+    case Thread::Priority::kBestEffort:
+      setpriority(PRIO_PROCESS, 0, 10);
+      break;
+    case Thread::Priority::kUserVisible:
+      setpriority(PRIO_PROCESS, 0, 1);
+      break;
+    case Thread::Priority::kUserBlocking:
+      setpriority(PRIO_PROCESS, 0, 0);
+      break;
+    case Thread::Priority::kDefault:
+      break;
+  }
+#endif
   DCHECK_NE(thread->data()->thread_, kNoThread);
   thread->NotifyStartedAndRun();
   return nullptr;

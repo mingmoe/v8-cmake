@@ -96,10 +96,7 @@ AllocationTracker::FunctionInfo::FunctionInfo()
       function_id(0),
       script_name(""),
       script_id(0),
-      line(-1),
-      column(-1) {
-}
-
+      start_position(-1) {}
 
 void AddressToTraceMap::AddRange(Address start, int size,
                                  unsigned trace_node_id) {
@@ -181,22 +178,9 @@ AllocationTracker::AllocationTracker(HeapObjectsMap* ids, StringsStorage* names)
   function_info_list_.push_back(info);
 }
 
-
 AllocationTracker::~AllocationTracker() {
-  for (UnresolvedLocation* location : unresolved_locations_) delete location;
   for (FunctionInfo* info : function_info_list_) delete info;
 }
-
-
-void AllocationTracker::PrepareForSerialization() {
-  for (UnresolvedLocation* location : unresolved_locations_) {
-    location->Resolve();
-    delete location;
-  }
-  unresolved_locations_.clear();
-  unresolved_locations_.shrink_to_fit();
-}
-
 
 void AllocationTracker::AllocationEvent(Address addr, int size) {
   DisallowGarbageCollection no_gc;
@@ -211,9 +195,9 @@ void AllocationTracker::AllocationEvent(Address addr, int size) {
   JavaScriptStackFrameIterator it(isolate);
   while (!it.done() && length < kMaxAllocationTraceLength) {
     JavaScriptFrame* frame = it.frame();
-    SharedFunctionInfo shared = frame->function().shared();
+    Tagged<SharedFunctionInfo> shared = frame->function()->shared();
     SnapshotObjectId id =
-        ids_->FindOrAddEntry(shared.address(), shared.Size(),
+        ids_->FindOrAddEntry(shared.address(), shared->Size(),
                              HeapObjectsMap::MarkEntryAccessed::kNo);
     allocation_trace_buffer_[length++] = AddFunctionInfo(shared, id);
     it.Advance();
@@ -236,25 +220,22 @@ static uint32_t SnapshotObjectIdHash(SnapshotObjectId id) {
   return ComputeUnseededHash(static_cast<uint32_t>(id));
 }
 
-unsigned AllocationTracker::AddFunctionInfo(SharedFunctionInfo shared,
+unsigned AllocationTracker::AddFunctionInfo(Tagged<SharedFunctionInfo> shared,
                                             SnapshotObjectId id) {
   base::HashMap::Entry* entry = id_to_function_info_index_.LookupOrInsert(
       reinterpret_cast<void*>(id), SnapshotObjectIdHash(id));
   if (entry->value == nullptr) {
     FunctionInfo* info = new FunctionInfo();
-    info->name = names_->GetCopy(shared.DebugNameCStr().get());
+    info->name = names_->GetCopy(shared->DebugNameCStr().get());
     info->function_id = id;
-    if (shared.script().IsScript()) {
-      Script script = Script::cast(shared.script());
-      if (script.name().IsName()) {
-        Name name = Name::cast(script.name());
+    if (IsScript(shared->script())) {
+      Tagged<Script> script = Script::cast(shared->script());
+      if (IsName(script->name())) {
+        Tagged<Name> name = Name::cast(script->name());
         info->script_name = names_->GetName(name);
       }
-      info->script_id = script.id();
-      // Converting start offset into line and column may cause heap
-      // allocations so we postpone them until snapshot serialization.
-      unresolved_locations_.push_back(
-          new UnresolvedLocation(script, shared.StartPosition(), info));
+      info->script_id = script->id();
+      info->start_position = shared->StartPosition();
     }
     entry->value = reinterpret_cast<void*>(function_info_list_.size());
     function_info_list_.push_back(info);
@@ -273,40 +254,6 @@ unsigned AllocationTracker::functionInfoIndexForVMState(StateTag state) {
   }
   return info_index_for_other_state_;
 }
-
-AllocationTracker::UnresolvedLocation::UnresolvedLocation(Script script,
-                                                          int start,
-                                                          FunctionInfo* info)
-    : start_position_(start), info_(info) {
-  script_ = script.GetIsolate()->global_handles()->Create(script);
-  GlobalHandles::MakeWeak(script_.location(), this, &HandleWeakScript,
-                          v8::WeakCallbackType::kParameter);
-}
-
-AllocationTracker::UnresolvedLocation::~UnresolvedLocation() {
-  if (!script_.is_null()) {
-    GlobalHandles::Destroy(script_.location());
-  }
-}
-
-
-void AllocationTracker::UnresolvedLocation::Resolve() {
-  if (script_.is_null()) return;
-  HandleScope scope(script_->GetIsolate());
-  Script::PositionInfo pos_info;
-  Script::GetPositionInfo(script_, start_position_, &pos_info);
-  info_->line = pos_info.line;
-  info_->column = pos_info.column;
-}
-
-void AllocationTracker::UnresolvedLocation::HandleWeakScript(
-    const v8::WeakCallbackInfo<void>& data) {
-  UnresolvedLocation* loc =
-      reinterpret_cast<UnresolvedLocation*>(data.GetParameter());
-  GlobalHandles::Destroy(loc->script_.location());
-  loc->script_ = Handle<Script>::null();
-}
-
 
 }  // namespace internal
 }  // namespace v8

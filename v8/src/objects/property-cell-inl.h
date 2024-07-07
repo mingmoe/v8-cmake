@@ -20,13 +20,15 @@ namespace internal {
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(PropertyCell)
 
-ACCESSORS(PropertyCell, dependent_code, DependentCode, kDependentCodeOffset)
-ACCESSORS(PropertyCell, name, Name, kNameOffset)
-ACCESSORS(PropertyCell, property_details_raw, Smi, kPropertyDetailsRawOffset)
-RELEASE_ACQUIRE_ACCESSORS(PropertyCell, property_details_raw, Smi,
+ACCESSORS(PropertyCell, dependent_code, Tagged<DependentCode>,
+          kDependentCodeOffset)
+ACCESSORS(PropertyCell, name, Tagged<Name>, kNameOffset)
+ACCESSORS(PropertyCell, property_details_raw, Tagged<Smi>,
+          kPropertyDetailsRawOffset)
+RELEASE_ACQUIRE_ACCESSORS(PropertyCell, property_details_raw, Tagged<Smi>,
                           kPropertyDetailsRawOffset)
-ACCESSORS(PropertyCell, value, Object, kValueOffset)
-RELEASE_ACQUIRE_ACCESSORS(PropertyCell, value, Object, kValueOffset)
+ACCESSORS(PropertyCell, value, Tagged<Object>, kValueOffset)
+RELEASE_ACQUIRE_ACCESSORS(PropertyCell, value, Tagged<Object>, kValueOffset)
 
 PropertyDetails PropertyCell::property_details() const {
   return PropertyDetails(Smi::cast(property_details_raw()));
@@ -64,6 +66,17 @@ void PropertyCell::Transition(PropertyDetails new_details,
   set_property_details_raw(transition_marker.AsSmi(), kReleaseStore);
   set_value(*new_value, kReleaseStore);
   set_property_details_raw(new_details.AsSmi(), kReleaseStore);
+}
+
+TQ_OBJECT_CONSTRUCTORS_IMPL(ConstTrackingLetCell)
+
+ACCESSORS(ConstTrackingLetCell, dependent_code, Tagged<DependentCode>,
+          kDependentCodeOffset)
+
+bool ConstTrackingLetCell::IsNotConst(Tagged<Object> object) {
+  DCHECK(IsConstTrackingLetCell(object) ||
+         (object == kNonConstMarker || object == kConstMarker));
+  return object == kNonConstMarker;
 }
 
 }  // namespace internal

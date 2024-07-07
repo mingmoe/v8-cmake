@@ -601,18 +601,21 @@ class MockPlatform final : public TestPlatform {
  private:
   class MockTaskRunner : public v8::TaskRunner {
    public:
-    void PostTask(std::unique_ptr<v8::Task> task) override {
+    void PostTaskImpl(std::unique_ptr<v8::Task> task,
+                      const SourceLocation&) override {
       task->Run();
       posted_count_++;
     }
 
-    void PostDelayedTask(std::unique_ptr<Task> task,
-                         double delay_in_seconds) override {
+    void PostDelayedTaskImpl(std::unique_ptr<Task> task,
+                             double delay_in_seconds,
+                             const SourceLocation&) override {
       task_ = std::move(task);
       delay_ = delay_in_seconds;
     }
 
-    void PostIdleTask(std::unique_ptr<IdleTask> task) override {
+    void PostIdleTaskImpl(std::unique_ptr<IdleTask> task,
+                          const SourceLocation&) override {
       UNREACHABLE();
     }
 
@@ -874,7 +877,7 @@ int GetFunctionLineNumber(CpuProfiler* profiler, LocalContext* env,
           (*env)->Global()->Get(env->local(), v8_str(name)).ToLocalChecked())));
   PtrComprCageBase cage_base(isolate);
   CodeEntry* func_entry = instruction_stream_map->FindEntry(
-      func->abstract_code(isolate).InstructionStart(cage_base));
+      func->abstract_code(isolate)->InstructionStart(cage_base));
   if (!func_entry) FATAL("%s", name);
   return func_entry->line_number();
 }

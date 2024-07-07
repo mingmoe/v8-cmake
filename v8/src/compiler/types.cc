@@ -8,6 +8,7 @@
 
 #include "src/compiler/js-heap-broker.h"
 #include "src/numbers/conversions-inl.h"
+#include "src/objects/elements-kind.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/turbofan-types.h"
 #include "src/utils/ostreams.h"
@@ -146,30 +147,31 @@ Type::bitset Type::BitsetLub() const {
 template <typename MapRefLike>
 Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
   switch (map.instance_type()) {
-    case CONS_STRING_TYPE:
+    case CONS_TWO_BYTE_STRING_TYPE:
     case CONS_ONE_BYTE_STRING_TYPE:
-    case THIN_STRING_TYPE:
-    case SLICED_STRING_TYPE:
+    case THIN_TWO_BYTE_STRING_TYPE:
+    case THIN_ONE_BYTE_STRING_TYPE:
+    case SLICED_TWO_BYTE_STRING_TYPE:
     case SLICED_ONE_BYTE_STRING_TYPE:
-    case EXTERNAL_STRING_TYPE:
+    case EXTERNAL_TWO_BYTE_STRING_TYPE:
     case EXTERNAL_ONE_BYTE_STRING_TYPE:
-    case UNCACHED_EXTERNAL_STRING_TYPE:
+    case UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE:
     case UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-    case STRING_TYPE:
-    case ONE_BYTE_STRING_TYPE:
-    case SHARED_STRING_TYPE:
-    case SHARED_EXTERNAL_STRING_TYPE:
-    case SHARED_ONE_BYTE_STRING_TYPE:
+    case SEQ_TWO_BYTE_STRING_TYPE:
+    case SEQ_ONE_BYTE_STRING_TYPE:
+    case SHARED_SEQ_TWO_BYTE_STRING_TYPE:
+    case SHARED_SEQ_ONE_BYTE_STRING_TYPE:
+    case SHARED_EXTERNAL_TWO_BYTE_STRING_TYPE:
     case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-    case SHARED_UNCACHED_EXTERNAL_STRING_TYPE:
+    case SHARED_UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE:
     case SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
       return kString;
-    case EXTERNAL_INTERNALIZED_STRING_TYPE:
-    case EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE:
-    case UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE:
-    case UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE:
-    case INTERNALIZED_STRING_TYPE:
-    case ONE_BYTE_INTERNALIZED_STRING_TYPE:
+    case EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE:
+    case EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE:
+    case UNCACHED_EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE:
+    case UNCACHED_EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE:
+    case INTERNALIZED_TWO_BYTE_STRING_TYPE:
+    case INTERNALIZED_ONE_BYTE_STRING_TYPE:
       return kInternalizedString;
     case SYMBOL_TYPE:
       return kSymbol;
@@ -185,16 +187,12 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
           return kNull;
         case OddballType::kUndefined:
           return kUndefined;
-        case OddballType::kUninitialized:
-        case OddballType::kOther:
-          // TODO(neis): We should add a kOtherOddball type.
-          return kOtherInternal;
       }
       UNREACHABLE();
     case HOLE_TYPE:
-      // TODO(chromium:1445008) add a switch similar to the above one for the
-      // concrete type once there are multiple different hole types.
-      return kHole;
+      // Holes have a single map and we should have distinguished them earlier
+      // by pointer comparison on the value.
+      UNREACHABLE();
     case HEAP_NUMBER_TYPE:
       return kNumber;
     case JS_ARRAY_ITERATOR_PROTOTYPE_TYPE:
@@ -229,7 +227,16 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
       return kOtherObject;
     case JS_ARRAY_TYPE:
       return kArray;
-    case JS_PRIMITIVE_WRAPPER_TYPE:
+    case JS_PRIMITIVE_WRAPPER_TYPE: {
+      DCHECK(!map.is_callable());
+      DCHECK(!map.is_undetectable());
+      auto elements_kind = map.elements_kind();
+      if (elements_kind == ElementsKind::FAST_STRING_WRAPPER_ELEMENTS ||
+          elements_kind == ElementsKind::SLOW_STRING_WRAPPER_ELEMENTS) {
+        return kStringWrapper;
+      }
+      return kOtherObject;
+    }
     case JS_MESSAGE_OBJECT_TYPE:
     case JS_DATE_TYPE:
 #ifdef V8_INTL_SUPPORT
@@ -248,6 +255,7 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
     case JS_SEGMENTS_TYPE:
 #endif  // V8_INTL_SUPPORT
     case JS_CONTEXT_EXTENSION_OBJECT_TYPE:
+    case JS_DISPOSABLE_STACK_TYPE:
     case JS_GENERATOR_OBJECT_TYPE:
     case JS_ASYNC_FUNCTION_OBJECT_TYPE:
     case JS_ASYNC_GENERATOR_OBJECT_TYPE:
@@ -301,6 +309,7 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
     case WASM_MEMORY_OBJECT_TYPE:
     case WASM_MODULE_OBJECT_TYPE:
     case WASM_SUSPENDER_OBJECT_TYPE:
+    case WASM_SUSPENDING_OBJECT_TYPE:
     case WASM_TABLE_OBJECT_TYPE:
     case WASM_TAG_OBJECT_TYPE:
     case WASM_EXCEPTION_PACKAGE_TYPE:
@@ -346,6 +355,7 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
     case ACCESSOR_PAIR_TYPE:
     case EMBEDDER_DATA_ARRAY_TYPE:
     case FIXED_ARRAY_TYPE:
+    case CLASS_BOILERPLATE_TYPE:
     case PROPERTY_DESCRIPTOR_OBJECT_TYPE:
     case HASH_TABLE_TYPE:
     case ORDERED_HASH_MAP_TYPE:
@@ -388,6 +398,7 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
     case INSTRUCTION_STREAM_TYPE:
     case CODE_TYPE:
     case PROPERTY_CELL_TYPE:
+    case CONST_TRACKING_LET_CELL_TYPE:
     case SOURCE_TEXT_MODULE_TYPE:
     case SOURCE_TEXT_MODULE_INFO_ENTRY_TYPE:
     case SYNTHETIC_MODULE_TYPE:
@@ -919,6 +930,13 @@ Type Type::Constant(JSHeapBroker* broker, ObjectRef ref, Zone* zone) {
   if (ref.IsString() && !ref.IsInternalizedString()) {
     return Type::String();
   }
+  if (ref.IsJSPrimitiveWrapper() &&
+      ref.AsJSPrimitiveWrapper().IsStringWrapper(broker)) {
+    return Type::StringWrapper();
+  }
+  if (ref.HoleType() != HoleType::kNone) {
+    return Type::Hole();
+  }
   return HeapConstant(ref.AsHeapObject(), broker, zone);
 }
 
@@ -1159,6 +1177,7 @@ Type Type::OtherNumberConstant(double value, Zone* zone) {
 // static
 Type Type::HeapConstant(HeapObjectRef value, JSHeapBroker* broker, Zone* zone) {
   DCHECK(!value.IsHeapNumber());
+  DCHECK_EQ(value.HoleType(), HoleType::kNone);
   DCHECK_IMPLIES(value.IsString(), value.IsInternalizedString());
   BitsetType::bitset bitset =
       BitsetType::Lub(value.GetHeapObjectType(broker), broker);

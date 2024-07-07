@@ -9,6 +9,7 @@
 #include "src/execution/isolate.h"
 #include "src/execution/local-isolate.h"
 #include "src/handles/handles.h"
+#include "src/heap/page-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/cell.h"
@@ -98,6 +99,14 @@ ReadOnlyRoots::ReadOnlyRoots(LocalIsolate* isolate)
 READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
 
+Tagged<Boolean> ReadOnlyRoots::boolean_value(bool value) const {
+  return value ? Tagged<Boolean>(true_value()) : Tagged<Boolean>(false_value());
+}
+Handle<Boolean> ReadOnlyRoots::boolean_value_handle(bool value) const {
+  return value ? Handle<Boolean>(true_value_handle())
+               : Handle<Boolean>(false_value_handle());
+}
+
 Address* ReadOnlyRoots::GetLocation(RootIndex root_index) const {
   size_t index = static_cast<size_t>(root_index);
   DCHECK_LT(index, kEntriesCount);
@@ -117,7 +126,7 @@ Address ReadOnlyRoots::last_name_for_protector() const {
   return address_at(RootIndex::kLastNameForProtector);
 }
 
-bool ReadOnlyRoots::IsNameForProtector(HeapObject object) const {
+bool ReadOnlyRoots::IsNameForProtector(Tagged<HeapObject> object) const {
   return base::IsInRange(object.ptr(), first_name_for_protector(),
                          last_name_for_protector());
 }
@@ -125,8 +134,8 @@ bool ReadOnlyRoots::IsNameForProtector(HeapObject object) const {
 void ReadOnlyRoots::VerifyNameForProtectorsPages() const {
   // The symbols and strings that can cause protector invalidation should
   // reside on the same page so we can do a fast range check.
-  CHECK_EQ(Page::FromAddress(first_name_for_protector()),
-           Page::FromAddress(last_name_for_protector()));
+  CHECK_EQ(PageMetadata::FromAddress(first_name_for_protector()),
+           PageMetadata::FromAddress(last_name_for_protector()));
 }
 
 Handle<Object> ReadOnlyRoots::handle_at(RootIndex root_index) const {

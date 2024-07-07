@@ -17,7 +17,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "src/base/functional.h"
+#include "src/base/intrusive-set.h"
+#include "src/base/small-map.h"
 #include "src/base/small-vector.h"
 #include "src/zone/zone-allocator.h"
 
@@ -62,7 +66,7 @@ class ZoneVector {
   // Constructs a new vector and fills it with {size} elements, each
   // constructed via the default constructor.
   ZoneVector(size_t size, Zone* zone) : zone_(zone) {
-    data_ = size > 0 ? zone->NewArray<T>(size) : nullptr;
+    data_ = size > 0 ? zone->AllocateArray<T>(size) : nullptr;
     end_ = capacity_ = data_ + size;
     for (T* p = data_; p < end_; p++) emplace(p);
   }
@@ -70,7 +74,7 @@ class ZoneVector {
   // Constructs a new vector and fills it with {size} elements, each
   // having the value {def}.
   ZoneVector(size_t size, T def, Zone* zone) : zone_(zone) {
-    data_ = size > 0 ? zone->NewArray<T>(size) : nullptr;
+    data_ = size > 0 ? zone->AllocateArray<T>(size) : nullptr;
     end_ = capacity_ = data_ + size;
     for (T* p = data_; p < end_; p++) emplace(p, def);
   }
@@ -80,7 +84,7 @@ class ZoneVector {
   ZoneVector(std::initializer_list<T> list, Zone* zone) : zone_(zone) {
     size_t size = list.size();
     if (size > 0) {
-      data_ = zone->NewArray<T>(size);
+      data_ = zone->AllocateArray<T>(size);
       CopyToNewStorage(data_, list.begin(), list.end());
     } else {
       data_ = nullptr;
@@ -97,7 +101,7 @@ class ZoneVector {
                       std::random_access_iterator_tag,
                       typename std::iterator_traits<It>::iterator_category>) {
       size_t size = last - first;
-      data_ = size > 0 ? zone->NewArray<T>(size) : nullptr;
+      data_ = size > 0 ? zone->AllocateArray<T>(size) : nullptr;
       end_ = capacity_ = data_ + size;
       for (T* p = data_; p < end_; p++) emplace(p, *first++);
     } else {
@@ -145,7 +149,7 @@ class ZoneVector {
       if (data_) zone_->DeleteArray(data_, capacity());
       size_t new_cap = other.capacity();
       if (new_cap > 0) {
-        data_ = zone_->NewArray<T>(new_cap);
+        data_ = zone_->AllocateArray<T>(new_cap);
         CopyToNewStorage(data_, other.data_, other.end_);
       } else {
         data_ = nullptr;
@@ -468,7 +472,7 @@ class ZoneVector {
     T* old_end = end_;
     size_t old_size = size();
     size_t new_capacity = NewCapacity(minimum);
-    data_ = zone_->NewArray<T>(new_capacity);
+    data_ = zone_->AllocateArray<T>(new_capacity);
     end_ = data_ + old_size;
     if (old_data) {
       MoveToNewStorage(data_, old_data, old_end);
@@ -489,7 +493,7 @@ class ZoneVector {
       T* old_end = end_;
       size_t old_size = size();
       size_t new_capacity = NewCapacity(old_size + count);
-      data_ = zone_->NewArray<T>(new_capacity);
+      data_ = zone_->AllocateArray<T>(new_capacity);
       end_ = data_ + old_size + count;
       if (old_data) {
         MoveToNewStorage(data_, old_data, pos);
@@ -588,6 +592,16 @@ bool operator<(const ZoneVector<T>& lhs, const ZoneVector<T>& rhs) {
   return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(),
                                       rhs.end());
 }
+
+template <class T, class GetIntrusiveSetIndex>
+class ZoneIntrusiveSet
+    : public base::IntrusiveSet<T, GetIntrusiveSetIndex, ZoneVector<T>> {
+ public:
+  explicit ZoneIntrusiveSet(Zone* zone, GetIntrusiveSetIndex index_functor = {})
+      : base::IntrusiveSet<T, GetIntrusiveSetIndex, ZoneVector<T>>(
+            ZoneVector<T>(zone), std::move(index_functor)) {}
+};
+using base::IntrusiveSetIndex;
 
 // A wrapper subclass for std::deque to make it easy to construct one
 // that uses a zone allocator.
@@ -697,7 +711,7 @@ class ZoneUnorderedMap
                                 ZoneAllocator<std::pair<const K, V>>> {
  public:
   // Constructs an empty map.
-  explicit ZoneUnorderedMap(Zone* zone, size_t bucket_count = 100)
+  explicit ZoneUnorderedMap(Zone* zone, size_t bucket_count = 0)
       : std::unordered_map<K, V, Hash, KeyEqual,
                            ZoneAllocator<std::pair<const K, V>>>(
             bucket_count, Hash(), KeyEqual(),
@@ -712,7 +726,7 @@ class ZoneUnorderedSet
     : public std::unordered_set<K, Hash, KeyEqual, ZoneAllocator<K>> {
  public:
   // Constructs an empty set.
-  explicit ZoneUnorderedSet(Zone* zone, size_t bucket_count = 100)
+  explicit ZoneUnorderedSet(Zone* zone, size_t bucket_count = 0)
       : std::unordered_set<K, Hash, KeyEqual, ZoneAllocator<K>>(
             bucket_count, Hash(), KeyEqual(), ZoneAllocator<K>(zone)) {}
 };
@@ -742,6 +756,68 @@ class SmallZoneVector : public base::SmallVector<T, kSize, ZoneAllocator<T>> {
   explicit SmallZoneVector(size_t size, Zone* zone)
       : base::SmallVector<T, kSize, ZoneAllocator<T>>(
             size, ZoneAllocator<T>(ZoneAllocator<T>(zone))) {}
+};
+
+// Used by SmallZoneMap below. Essentially a closure around placement-new of
+// the "full" fallback ZoneMap. Called once SmallMap grows beyond kArraySize.
+template <typename ZoneMap>
+class ZoneMapInit {
+ public:
+  explicit ZoneMapInit(Zone* zone) : zone_(zone) {}
+  void operator()(ZoneMap* map) const { new (map) ZoneMap(zone_); }
+
+ private:
+  Zone* zone_;
+};
+
+// A wrapper subclass for base::SmallMap to make it easy to construct one that
+// uses a zone-allocated std::map as the fallback once the SmallMap outgrows
+// its inline storage.
+template <typename K, typename V, size_t kArraySize,
+          typename Compare = std::less<K>, typename KeyEqual = std::equal_to<K>>
+class SmallZoneMap
+    : public base::SmallMap<ZoneMap<K, V, Compare>, kArraySize, KeyEqual,
+                            ZoneMapInit<ZoneMap<K, V, Compare>>> {
+ public:
+  explicit SmallZoneMap(Zone* zone)
+      : base::SmallMap<ZoneMap<K, V, Compare>, kArraySize, KeyEqual,
+                       ZoneMapInit<ZoneMap<K, V, Compare>>>(
+            ZoneMapInit<ZoneMap<K, V, Compare>>(zone)) {}
+};
+
+// A wrapper subclass for absl::flat_hash_map to make it easy to construct one
+// that uses a zone allocator. If you want to use a user-defined type as key
+// (K), you'll need to define a AbslHashValue function for it (see
+// https://abseil.io/docs/cpp/guides/hash).
+template <typename K, typename V,
+          typename Hash = typename absl::flat_hash_map<K, V>::hasher,
+          typename KeyEqual =
+              typename absl::flat_hash_map<K, V, Hash>::key_equal>
+class ZoneAbslFlatHashMap
+    : public absl::flat_hash_map<K, V, Hash, KeyEqual,
+                                 ZoneAllocator<std::pair<const K, V>>> {
+ public:
+  // Constructs an empty map.
+  explicit ZoneAbslFlatHashMap(Zone* zone, size_t bucket_count = 0)
+      : absl::flat_hash_map<K, V, Hash, KeyEqual,
+                            ZoneAllocator<std::pair<const K, V>>>(
+            bucket_count, Hash(), KeyEqual(),
+            ZoneAllocator<std::pair<const K, V>>(zone)) {}
+};
+
+// A wrapper subclass for absl::flat_hash_set to make it easy to construct one
+// that uses a zone allocator. If you want to use a user-defined type as key
+// (K), you'll need to define a AbslHashValue function for it (see
+// https://abseil.io/docs/cpp/guides/hash).
+template <typename K, typename Hash = typename absl::flat_hash_set<K>::hasher,
+          typename KeyEqual = typename absl::flat_hash_set<K, Hash>::key_equal>
+class ZoneAbslFlatHashSet
+    : public absl::flat_hash_set<K, Hash, KeyEqual, ZoneAllocator<K>> {
+ public:
+  // Constructs an empty map.
+  explicit ZoneAbslFlatHashSet(Zone* zone, size_t bucket_count = 0)
+      : absl::flat_hash_set<K, Hash, KeyEqual, ZoneAllocator<K>>(
+            bucket_count, Hash(), KeyEqual(), ZoneAllocator<K>(zone)) {}
 };
 
 // Typedefs to shorten commonly used vectors.

@@ -5,11 +5,6 @@
 #ifndef V8_BASELINE_BASELINE_COMPILER_H_
 #define V8_BASELINE_BASELINE_COMPILER_H_
 
-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
-// architectures.
-#include "src/flags/flags.h"
-#if ENABLE_SPARKPLUG
-
 #include "src/base/logging.h"
 #include "src/base/pointer-with-payload.h"
 #include "src/base/threaded-list.h"
@@ -23,6 +18,7 @@
 #include "src/logging/counters.h"
 #include "src/objects/map.h"
 #include "src/objects/tagged-index.h"
+#include "src/utils/bit-vector.h"
 
 namespace v8 {
 namespace internal {
@@ -42,7 +38,7 @@ class BytecodeOffsetTableBuilder {
   }
 
   template <typename IsolateT>
-  Handle<ByteArray> ToBytecodeOffsetTable(IsolateT* isolate);
+  Handle<TrustedByteArray> ToBytecodeOffsetTable(IsolateT* isolate);
 
   void Reserve(size_t size) { bytes_.reserve(size); }
 
@@ -58,8 +54,8 @@ class BaselineCompiler {
                             Handle<BytecodeArray> bytecode);
 
   void GenerateCode();
-  MaybeHandle<Code> Build(LocalIsolate* local_isolate);
-  static int EstimateInstructionSize(BytecodeArray bytecode);
+  MaybeHandle<Code> Build();
+  static int EstimateInstructionSize(Tagged<BytecodeArray> bytecode);
 
  private:
   void Prologue();
@@ -81,7 +77,7 @@ class BaselineCompiler {
   // Constant pool operands.
   template <typename Type>
   Handle<Type> Constant(int operand_index);
-  Smi ConstantSmi(int operand_index);
+  Tagged<Smi> ConstantSmi(int operand_index);
   template <typename Type>
   void LoadConstant(Register output, int operand_index);
 
@@ -92,12 +88,13 @@ class BaselineCompiler {
   uint32_t Flag8(int operand_index);
   uint32_t Flag16(int operand_index);
   uint32_t RegisterCount(int operand_index);
-  TaggedIndex IndexAsTagged(int operand_index);
-  TaggedIndex UintAsTagged(int operand_index);
-  Smi IndexAsSmi(int operand_index);
-  Smi IntAsSmi(int operand_index);
-  Smi Flag8AsSmi(int operand_index);
-  Smi Flag16AsSmi(int operand_index);
+  Tagged<TaggedIndex> IndexAsTagged(int operand_index);
+  Tagged<TaggedIndex> UintAsTagged(int operand_index);
+  Tagged<Smi> IndexAsSmi(int operand_index);
+  Tagged<Smi> IntAsSmi(int operand_index);
+  Tagged<Smi> UintAsSmi(int operand_index);
+  Tagged<Smi> Flag8AsSmi(int operand_index);
+  Tagged<Smi> Flag16AsSmi(int operand_index);
 
   // Jump helpers.
   Label* NewLabel();
@@ -182,29 +179,70 @@ class BaselineCompiler {
   // for CFI.
   enum class MarkAsIndirectJumpTarget { kNo, kYes };
 
-  struct BaselineLabelPointer : base::PointerWithPayload<Label, bool, 1> {
-    void MarkAsIndirectJumpTarget() { SetPayload(true); }
-    bool IsIndirectJumpTarget() const { return GetPayload(); }
-  };
-
-  Label* EnsureLabel(
-      int i, MarkAsIndirectJumpTarget mark = MarkAsIndirectJumpTarget::kNo) {
-    if (labels_[i].GetPointer() == nullptr) {
-      labels_[i].SetPointer(zone_.New<Label>());
+  Label* EnsureLabel(int offset, MarkAsIndirectJumpTarget mark =
+                                     MarkAsIndirectJumpTarget::kNo) {
+    Label* label = &labels_[offset];
+    if (!label_tags_.Contains(offset * 2)) {
+      label_tags_.Add(offset * 2);
+      new (label) Label();
     }
     if (mark == MarkAsIndirectJumpTarget::kYes) {
-      labels_[i].MarkAsIndirectJumpTarget();
+      MarkIndirectJumpTarget(offset);
     }
-    return labels_[i].GetPointer();
+    return label;
   }
+  bool IsJumpTarget(int offset) const {
+    return label_tags_.Contains(offset * 2);
+  }
+  bool IsIndirectJumpTarget(int offset) const {
+    return label_tags_.Contains(offset * 2 + 1);
+  }
+  void MarkIndirectJumpTarget(int offset) { label_tags_.Add(offset * 2 + 1); }
 
-  BaselineLabelPointer* labels_;
+  Label* labels_;
+  BitVector label_tags_;
+
+#ifdef DEBUG
+  friend class SaveAccumulatorScope;
+
+  struct EffectState {
+    bool may_have_deopted = false;
+    bool accumulator_on_stack = false;
+    bool safe_to_skip = false;
+
+    void MayDeopt() {
+      // If this check fails, you might need to update `BuiltinMayDeopt` if
+      // applicable.
+      DCHECK(!accumulator_on_stack);
+      may_have_deopted = true;
+    }
+
+    void CheckEffect() { DCHECK(!may_have_deopted || safe_to_skip); }
+
+    void clear() {
+      DCHECK(!accumulator_on_stack);
+      *this = EffectState();
+    }
+  } effect_state_;
+#endif
+};
+
+class SaveAccumulatorScope final {
+ public:
+  SaveAccumulatorScope(BaselineCompiler* compiler,
+                       BaselineAssembler* assembler);
+
+  ~SaveAccumulatorScope();
+
+ private:
+#ifdef DEBUG
+  BaselineCompiler* compiler_;
+#endif
+  BaselineAssembler* assembler_;
 };
 
 }  // namespace baseline
 }  // namespace internal
 }  // namespace v8
-
-#endif  // ENABLE_SPARKPLUG
 
 #endif  // V8_BASELINE_BASELINE_COMPILER_H_

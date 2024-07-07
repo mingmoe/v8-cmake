@@ -128,21 +128,22 @@ namespace compiler {
   V(CallableFunction,         uint64_t{1} << 20)  \
   V(ClassConstructor,         uint64_t{1} << 21)  \
   V(BoundFunction,            uint64_t{1} << 22)  \
-  V(Hole,                     uint64_t{1} << 23)  \
-  V(OtherInternal,            uint64_t{1} << 24)  \
-  V(ExternalPointer,          uint64_t{1} << 25)  \
-  V(Array,                    uint64_t{1} << 26)  \
-  V(UnsignedBigInt63,         uint64_t{1} << 27)  \
-  V(OtherUnsignedBigInt64,    uint64_t{1} << 28)  \
-  V(NegativeBigInt63,         uint64_t{1} << 29)  \
-  V(OtherBigInt,              uint64_t{1} << 30)  \
-  V(WasmObject,               uint64_t{1} << 31)
+  V(OtherInternal,            uint64_t{1} << 23)  \
+  V(ExternalPointer,          uint64_t{1} << 24)  \
+  V(Array,                    uint64_t{1} << 25)  \
+  V(UnsignedBigInt63,         uint64_t{1} << 26)  \
+  V(OtherUnsignedBigInt64,    uint64_t{1} << 27)  \
+  V(NegativeBigInt63,         uint64_t{1} << 28)  \
+  V(OtherBigInt,              uint64_t{1} << 29)  \
+  V(WasmObject,               uint64_t{1} << 30)  \
+  V(SandboxedPointer,         uint64_t{1} << 31)
 
 // We split the macro list into two parts because the Torque equivalent in
 // turbofan-types.tq uses two 32bit bitfield structs.
-#define PROPER_ATOMIC_BITSET_TYPE_HIGH_LIST(V) \
-  V(SandboxedPointer,         uint64_t{1} << 32) \
-  V(Machine,                  uint64_t{1} << 33)
+#define PROPER_ATOMIC_BITSET_TYPE_HIGH_LIST(V)                             \
+  V(Machine,                  uint64_t{1} << 32)                           \
+  V(Hole,                     uint64_t{1} << 33) \
+  V(StringWrapper,            uint64_t{1} << 34)
 
 #define PROPER_BITSET_TYPE_LIST(V) \
   V(None,                     uint64_t{0}) \
@@ -172,23 +173,21 @@ namespace compiler {
                                   kOtherBigInt) \
   V(Numeric,                      kNumber | kBigInt) \
   V(String,                       kInternalizedString | kOtherString) \
+  V(StringOrStringWrapper,        kString | kStringWrapper) \
   V(UniqueName,                   kSymbol | kInternalizedString) \
   V(Name,                         kSymbol | kString) \
   V(InternalizedStringOrNull,     kInternalizedString | kNull) \
   V(BooleanOrNumber,              kBoolean | kNumber) \
   V(BooleanOrNullOrNumber,        kBooleanOrNumber | kNull) \
   V(BooleanOrNullOrUndefined,     kBoolean | kNull | kUndefined) \
-  V(Oddball,                      kBooleanOrNullOrUndefined | kHole) \
   V(NullOrNumber,                 kNull | kNumber) \
   V(NullOrUndefined,              kNull | kUndefined) \
   V(Undetectable,                 kNullOrUndefined | kOtherUndetectable) \
   V(NumberOrHole,                 kNumber | kHole) \
-  V(NumberOrOddball,              kNumber | kNullOrUndefined | kBoolean | \
-                                  kHole) \
+  V(NumberOrOddball,              kNumber | kBooleanOrNullOrUndefined ) \
+  V(NumberOrOddballOrHole,        kNumberOrOddball| kHole ) \
   V(NumericOrString,              kNumeric | kString) \
   V(NumberOrUndefined,            kNumber | kUndefined) \
-  V(NumberOrUndefinedOrNullOrBoolean,  \
-                                  kNumber | kNullOrUndefined | kBoolean) \
   V(PlainPrimitive,               kNumber | kString | kBoolean | \
                                   kNullOrUndefined) \
   V(NonBigIntPrimitive,           kSymbol | kPlainPrimitive) \
@@ -197,14 +196,17 @@ namespace compiler {
   V(Proxy,                        kCallableProxy | kOtherProxy) \
   V(ArrayOrOtherObject,           kArray | kOtherObject) \
   V(ArrayOrProxy,                 kArray | kProxy) \
+  V(StringWrapperOrOtherObject,   kStringWrapper | kOtherObject) \
   V(Function,                     kCallableFunction | kClassConstructor) \
   V(DetectableCallable,           kFunction | kBoundFunction | \
                                   kOtherCallable | kCallableProxy) \
   V(Callable,                     kDetectableCallable | kOtherUndetectable) \
-  V(NonCallable,                  kArray | kOtherObject | kOtherProxy) \
+  V(NonCallable,                  kArray | kStringWrapper | kOtherObject | \
+                                  kOtherProxy) \
   V(NonCallableOrNull,            kNonCallable | kNull) \
   V(DetectableObject,             kArray | kFunction | kBoundFunction | \
-                                  kOtherCallable | kOtherObject) \
+                                  kStringWrapper | kOtherCallable | \
+                                  kOtherObject) \
   V(DetectableReceiver,           kDetectableObject | kProxy | kWasmObject) \
   V(DetectableReceiverOrNull,     kDetectableReceiver | kNull) \
   V(Object,                       kDetectableObject | kOtherUndetectable) \
@@ -477,7 +479,7 @@ class V8_EXPORT_PRIVATE Type {
   bool IsSingleton() const {
     if (IsNone()) return false;
     return Is(Type::Null()) || Is(Type::Undefined()) || Is(Type::MinusZero()) ||
-           Is(Type::NaN()) || Is(Type::Hole()) || IsHeapConstant() ||
+           Is(Type::NaN()) || IsHeapConstant() ||
            (Is(Type::PlainNumber()) && Min() == Max());
   }
 
@@ -676,7 +678,7 @@ class StructuralType : public TypeBase {
 
   StructuralType(Kind kind, int length, Zone* zone)
       : TypeBase(kind), length_(length) {
-    elements_ = zone->NewArray<Type>(length);
+    elements_ = zone->AllocateArray<Type>(length);
   }
 
  private:

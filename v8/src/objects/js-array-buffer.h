@@ -23,7 +23,7 @@ class ArrayBufferExtension;
 
 class JSArrayBuffer
     : public TorqueGeneratedJSArrayBuffer<JSArrayBuffer,
-                                          JSObjectWithEmbedderSlots> {
+                                          JSAPIObjectWithEmbedderSlots> {
  public:
 // The maximum length for JSArrayBuffer's supported by V8.
 // On 32-bit architectures we limit this to 2GiB, so that
@@ -50,6 +50,7 @@ class JSArrayBuffer
 
   // [extension]: extension object used for GC
   DECL_PRIMITIVE_ACCESSORS(extension, ArrayBufferExtension*)
+  inline void init_extension();
 
   // [bit_field]: boolean flags
   DECL_PRIMITIVE_ACCESSORS(bit_field, uint32_t)
@@ -87,7 +88,7 @@ class JSArrayBuffer
   // An ArrayBuffer with a size greater than zero is never empty.
   DECL_GETTER(IsEmpty, bool)
 
-  DECL_ACCESSORS(detach_key, Object)
+  DECL_ACCESSORS(detach_key, Tagged<Object>)
 
   // Initializes the fields of the ArrayBuffer. The provided backing_store can
   // be nullptr. If it is not nullptr, then the function registers it with
@@ -154,8 +155,6 @@ class JSArrayBuffer
   DECL_PRINTER(JSArrayBuffer)
   DECL_VERIFIER(JSArrayBuffer)
 
-  static constexpr int kEndOfTaggedFieldsOffset = kRawByteLengthOffset;
-
   static const int kSizeWithEmbedderFields =
       kHeaderSize +
       v8::ArrayBuffer::kEmbedderFieldCount * kEmbedderDataSlotSize;
@@ -184,7 +183,12 @@ class JSArrayBuffer
 // extension-object. The GC periodically iterates all extensions concurrently
 // and frees unmarked ones.
 // https://docs.google.com/document/d/1-ZrLdlFX1nXT3z-FAgLbKal1gI8Auiaya_My-a0UJ28/edit
-class ArrayBufferExtension final : public Malloced {
+class ArrayBufferExtension final
+#ifdef V8_COMPRESS_POINTERS
+    : public ExternalPointerTable::ManagedResource {
+#else
+    : public Malloced {
+#endif  // V8_COMPRESS_POINTERS
  public:
   ArrayBufferExtension() : backing_store_(std::shared_ptr<BackingStore>()) {}
   explicit ArrayBufferExtension(std::shared_ptr<BackingStore> backing_store)
@@ -249,8 +253,10 @@ class ArrayBufferExtension final : public Malloced {
 
 class JSArrayBufferView
     : public TorqueGeneratedJSArrayBufferView<JSArrayBufferView,
-                                              JSObjectWithEmbedderSlots> {
+                                              JSAPIObjectWithEmbedderSlots> {
  public:
+  class BodyDescriptor;
+
   // [byte_offset]: offset of typed array in bytes.
   DECL_PRIMITIVE_ACCESSORS(byte_offset, size_t)
 
@@ -268,8 +274,6 @@ class JSArrayBufferView
   DECL_BOOLEAN_ACCESSORS(is_backed_by_rab)
   inline bool IsVariableLength() const;
 
-  static constexpr int kEndOfTaggedFieldsOffset = kRawByteOffsetOffset;
-
   static_assert(IsAligned(kRawByteOffsetOffset, kUIntptrSize));
   static_assert(IsAligned(kRawByteLengthOffset, kUIntptrSize));
 
@@ -279,16 +283,14 @@ class JSArrayBufferView
 class JSTypedArray
     : public TorqueGeneratedJSTypedArray<JSTypedArray, JSArrayBufferView> {
  public:
-  // TODO(v8:4153): This should be equal to JSArrayBuffer::kMaxByteLength
-  // eventually.
-  static constexpr size_t kMaxLength = v8::TypedArray::kMaxLength;
-  static_assert(kMaxLength <= JSArrayBuffer::kMaxByteLength);
+  static constexpr size_t kMaxByteLength = JSArrayBuffer::kMaxByteLength;
+  static_assert(kMaxByteLength == v8::TypedArray::kMaxByteLength);
 
   // [length]: length of typed array in elements.
   DECL_PRIMITIVE_GETTER(length, size_t)
 
-  DECL_GETTER(base_pointer, Object)
-  DECL_ACQUIRE_GETTER(base_pointer, Object)
+  DECL_GETTER(base_pointer, Tagged<Object>)
+  DECL_ACQUIRE_GETTER(base_pointer, Tagged<Object>)
 
   // ES6 9.4.5.3
   V8_WARN_UNUSED_RESULT static Maybe<bool> DefineOwnProperty(
@@ -396,8 +398,8 @@ class JSTypedArray
 
   DECL_GETTER(external_pointer, Address)
 
-  DECL_SETTER(base_pointer, Object)
-  DECL_RELEASE_SETTER(base_pointer, Object)
+  DECL_SETTER(base_pointer, Tagged<Object>)
+  DECL_RELEASE_SETTER(base_pointer, Tagged<Object>)
 
   inline void set_external_pointer(Isolate* isolate, Address value);
 

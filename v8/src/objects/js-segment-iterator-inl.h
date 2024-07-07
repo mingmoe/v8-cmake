@@ -20,12 +20,18 @@ namespace internal {
 #include "torque-generated/src/objects/js-segment-iterator-tq-inl.inc"
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSSegmentIterator)
+TQ_OBJECT_CONSTRUCTORS_IMPL(JSSegmentDataObject)
+TQ_OBJECT_CONSTRUCTORS_IMPL(JSSegmentDataObjectWithIsWordLike)
+
+CAST_ACCESSOR(JSSegmentDataObject)
+CAST_ACCESSOR(JSSegmentDataObjectWithIsWordLike)
 
 // Base segment iterator accessors.
-ACCESSORS(JSSegmentIterator, icu_break_iterator, Managed<icu::BreakIterator>,
-          kIcuBreakIteratorOffset)
-ACCESSORS(JSSegmentIterator, unicode_string, Managed<icu::UnicodeString>,
-          kUnicodeStringOffset)
+ACCESSORS(JSSegmentIterator, icu_break_iterator,
+          Tagged<Managed<icu::BreakIterator>>, kIcuBreakIteratorOffset)
+ACCESSORS(JSSegmentIterator, raw_string, Tagged<String>, kRawStringOffset)
+ACCESSORS(JSSegmentIterator, unicode_string,
+          Tagged<Managed<icu::UnicodeString>>, kUnicodeStringOffset)
 
 inline void JSSegmentIterator::set_granularity(
     JSSegmenter::Granularity granularity) {

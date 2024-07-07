@@ -230,12 +230,19 @@ HeapNumberRequest::HeapNumberRequest(double heap_number, int offset)
 
 void Assembler::RecordDeoptReason(DeoptimizeReason reason, uint32_t node_id,
                                   SourcePosition position, int id) {
-  EnsureSpace ensure_space(this);
-  RecordRelocInfo(RelocInfo::DEOPT_SCRIPT_OFFSET, position.ScriptOffset());
-  RecordRelocInfo(RelocInfo::DEOPT_INLINING_ID, position.InliningId());
-  RecordRelocInfo(RelocInfo::DEOPT_REASON, static_cast<int>(reason));
-  RecordRelocInfo(RelocInfo::DEOPT_ID, id);
+  static_assert(RelocInfoWriter::kMaxSize * 2 <= kGap);
+  {
+    EnsureSpace space(this);
+    RecordRelocInfo(RelocInfo::DEOPT_SCRIPT_OFFSET, position.ScriptOffset());
+    RecordRelocInfo(RelocInfo::DEOPT_INLINING_ID, position.InliningId());
+  }
+  {
+    EnsureSpace space(this);
+    RecordRelocInfo(RelocInfo::DEOPT_REASON, static_cast<int>(reason));
+    RecordRelocInfo(RelocInfo::DEOPT_ID, id);
+  }
 #ifdef DEBUG
+  EnsureSpace space(this);
   RecordRelocInfo(RelocInfo::DEOPT_NODE_ID, node_id);
 #endif  // DEBUG
 }
@@ -308,12 +315,13 @@ int Assembler::WriteCodeComments() {
 
 #ifdef V8_CODE_COMMENTS
 int Assembler::CodeComment::depth() const { return assembler_->comment_depth_; }
-void Assembler::CodeComment::Open(const std::string& comment) {
+void Assembler::CodeComment::Open(const std::string& comment,
+                                  const SourceLocation& loc) {
   std::stringstream sstream;
   sstream << std::setfill(' ') << std::setw(depth() * kIndentWidth + 2);
   sstream << "[ " << comment;
   assembler_->comment_depth_++;
-  assembler_->RecordComment(sstream.str());
+  assembler_->RecordComment(sstream.str(), loc);
 }
 
 void Assembler::CodeComment::Close() {
@@ -321,7 +329,8 @@ void Assembler::CodeComment::Close() {
   std::string comment = "]";
   comment.insert(0, depth() * kIndentWidth, ' ');
   DCHECK_LE(0, depth());
-  assembler_->RecordComment(comment);
+  // Don't record source information for the closed comment.
+  assembler_->RecordComment(comment, SourceLocation());
 }
 #endif
 

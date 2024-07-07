@@ -78,7 +78,7 @@ AsmJsParser::AsmJsParser(Zone* zone, uintptr_t stack_limit,
       stack_limit_(stack_limit),
       block_stack_(zone),
       global_imports_(zone) {
-  module_builder_->SetMinMemorySize(0);
+  module_builder_->AddMemory(0);
   InitializeStdlibTypes();
 }
 
@@ -208,9 +208,7 @@ wasm::AsmJsParser::VarInfo* AsmJsParser::GetVarInfo(
   if (is_global && index + 1 > num_globals_) num_globals_ = index + 1;
   if (index + 1 > old_capacity) {
     size_t new_size = std::max(2 * old_capacity, index + 1);
-    base::Vector<VarInfo> new_info{zone_->NewArray<VarInfo>(new_size),
-                                   new_size};
-    std::uninitialized_fill(new_info.begin(), new_info.end(), VarInfo{});
+    base::Vector<VarInfo> new_info = zone_->NewVector<VarInfo>(new_size);
     std::copy(var_info.begin(), var_info.end(), new_info.begin());
     var_info = new_info;
   }
@@ -260,10 +258,7 @@ uint32_t AsmJsParser::TempVariable(int index) {
 }
 
 base::Vector<const char> AsmJsParser::CopyCurrentIdentifierString() {
-  const std::string& str = scanner_.GetIdentifierString();
-  char* buffer = zone()->NewArray<char>(str.size());
-  str.copy(buffer, str.size());
-  return base::Vector<const char>(buffer, static_cast<int>(str.size()));
+  return zone()->CloneVector(base::VectorOf(scanner_.GetIdentifierString()));
 }
 
 void AsmJsParser::SkipSemicolon() {
@@ -374,8 +369,8 @@ void AsmJsParser::ValidateModule() {
     uint32_t import_index = module_builder_->AddGlobalImport(
         global_import.import_name, global_import.value_type,
         false /* mutability */);
-    start->EmitWithI32V(kExprGlobalGet, import_index);
-    start->EmitWithI32V(kExprGlobalSet, VarIndex(global_import.var_info));
+    start->EmitWithU32V(kExprGlobalGet, import_index);
+    start->EmitWithU32V(kExprGlobalSet, VarIndex(global_import.var_info));
   }
   start->Emit(kExprEnd);
   FunctionSig::Builder b(zone(), 0, 0);
@@ -966,7 +961,7 @@ void AsmJsParser::ValidateFunctionLocals(size_t param_count,
           } else {
             FAIL("Bad local variable definition");
           }
-          current_function_builder_->EmitWithI32V(kExprGlobalGet,
+          current_function_builder_->EmitWithU32V(kExprGlobalGet,
                                                   VarIndex(sinfo));
           current_function_builder_->EmitSetLocal(info->index);
         } else if (sinfo->type->IsA(stdlib_fround_)) {
@@ -1280,8 +1275,7 @@ void AsmJsParser::BreakStatement() {
   if (depth < 0) {
     FAIL("Illegal break");
   }
-  current_function_builder_->Emit(kExprBr);
-  current_function_builder_->EmitI32V(depth);
+  current_function_builder_->EmitWithU32V(kExprBr, depth);
   SkipSemicolon();
 }
 
@@ -1297,7 +1291,7 @@ void AsmJsParser::ContinueStatement() {
   if (depth < 0) {
     FAIL("Illegal continue");
   }
-  current_function_builder_->EmitWithI32V(kExprBr, depth);
+  current_function_builder_->EmitWithU32V(kExprBr, depth);
   SkipSemicolon();
 }
 
@@ -1342,9 +1336,9 @@ void AsmJsParser::SwitchStatement() {
     current_function_builder_->EmitGetLocal(tmp);
     current_function_builder_->EmitI32Const(c);
     current_function_builder_->Emit(kExprI32Eq);
-    current_function_builder_->EmitWithI32V(kExprBrIf, table_pos++);
+    current_function_builder_->EmitWithU32V(kExprBrIf, table_pos++);
   }
-  current_function_builder_->EmitWithI32V(kExprBr, table_pos++);
+  current_function_builder_->EmitWithU32V(kExprBr, table_pos++);
   while (!failed_ && Peek(TOK(case))) {
     current_function_builder_->Emit(kExprEnd);
     BareEnd();
@@ -1460,7 +1454,7 @@ AsmType* AsmJsParser::Identifier() {
     if (info->kind != VarKind::kGlobal) {
       FAILn("Undefined global variable");
     }
-    current_function_builder_->EmitWithI32V(kExprGlobalGet, VarIndex(info));
+    current_function_builder_->EmitWithU32V(kExprGlobalGet, VarIndex(info));
     return info->type;
   }
   UNREACHABLE();

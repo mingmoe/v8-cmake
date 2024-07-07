@@ -102,9 +102,8 @@ const char* V8NameConverter::NameOfAddress(uint8_t* pc) const {
     }
 
 #if V8_ENABLE_WEBASSEMBLY
-    wasm::WasmCodeRefScope wasm_code_ref_scope;
     if (auto* wasm_code = wasm::GetWasmCodeManager()->LookupCode(
-            reinterpret_cast<Address>(pc))) {
+            isolate_, reinterpret_cast<Address>(pc))) {
       SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc),
                wasm::GetWasmCodeKindAsString(wasm_code->kind()));
       return v8_buffer_.begin();
@@ -243,7 +242,7 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
   } else if (RelocInfo::IsEmbeddedObjectMode(rmode)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);
-    relocinfo->target_object(isolate).ShortPrint(&accumulator);
+    ShortPrint(relocinfo->target_object(isolate), &accumulator);
     std::unique_ptr<char[]> obj_name = accumulator.ToCString();
     const bool is_compressed = RelocInfo::IsCompressedEmbeddedObject(rmode);
     out << "    ;; " << (is_compressed ? "(compressed) " : "")
@@ -257,19 +256,19 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
     out << "    ;; external reference (" << reference_name << ")";
   } else if (RelocInfo::IsCodeTargetMode(rmode)) {
     out << "    ;; code:";
-    Code code =
+    Tagged<Code> code =
         isolate->heap()->FindCodeForInnerPointer(relocinfo->target_address());
-    CodeKind kind = code.kind();
-    if (code.is_builtin()) {
-      out << " Builtin::" << Builtins::name(code.builtin_id());
+    CodeKind kind = code->kind();
+    if (code->is_builtin()) {
+      out << " Builtin::" << Builtins::name(code->builtin_id());
     } else {
       out << " " << CodeKindToString(kind);
     }
 #if V8_ENABLE_WEBASSEMBLY
   } else if (RelocInfo::IsWasmStubCall(rmode) && host.is_wasm_code()) {
     // Host is isolate-independent, try wasm native module instead.
-    const char* runtime_stub_name = GetRuntimeStubName(
-        host.as_wasm_code()->native_module()->GetRuntimeStubId(
+    const char* runtime_stub_name = Builtins::name(
+        host.as_wasm_code()->native_module()->GetBuiltinInJumptableSlot(
             relocinfo->wasm_stub_call_address()));
     out << "    ;; wasm stub: " << runtime_stub_name;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -321,6 +320,19 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
                  reinterpret_cast<intptr_t>(ptr),
                  static_cast<size_t>(ptr - begin));
         pc += sizeof(ptr);
+#ifdef V8_TARGET_ARCH_X64
+      } else if (!rit.done() &&
+                 rit.rinfo()->pc() == reinterpret_cast<Address>(pc) &&
+                 rit.rinfo()->rmode() ==
+                     RelocInfo::RELATIVE_SWITCH_TABLE_ENTRY) {
+        int target_pc_offset = static_cast<int>(rit.rinfo()->data());
+        uint8_t* ptr = begin + target_pc_offset;
+        SNPrintF(decode_buffer, "%08" V8PRIxPTR "       jump table entry %4zx",
+                 reinterpret_cast<intptr_t>(ptr),
+                 static_cast<size_t>(target_pc_offset));
+        // We use emitl (4 bytes) for the value in the table.
+        pc += 4;
+#endif  // V8_TARGET_ARCH_X64
       } else {
         decode_buffer[0] = '\0';
         pc += d.InstructionDecode(decode_buffer, pc);
@@ -357,7 +369,13 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
 
     // Comments.
     for (size_t i = 0; i < comments.size(); i++) {
+      if (v8_flags.log_colour) {
+        out << "\033[34m";
+      }
       out << "                  " << comments[i];
+      if (v8_flags.log_colour) {
+        out << "\033[;m";
+      }
       DumpBuffer(os, out);
     }
 

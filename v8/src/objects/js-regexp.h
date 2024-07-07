@@ -56,21 +56,22 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
                                           Handle<String> source,
                                           Handle<String> flags_string);
 
-  DECL_ACCESSORS(last_index, Object)
+  DECL_ACCESSORS(last_index, Tagged<Object>)
 
   // Instance fields accessors.
-  inline String source() const;
+  inline Tagged<String> source() const;
   inline Flags flags() const;
 
   // Data array field accessors.
 
   inline Type type_tag() const;
-  inline String atom_pattern() const;
+  inline Tagged<String> atom_pattern() const;
   // This could be a Smi kUninitializedValue or InstructionStream.
-  V8_EXPORT_PRIVATE Object code(bool is_latin1) const;
+  V8_EXPORT_PRIVATE Tagged<Object> code(IsolateForSandbox isolate,
+                                        bool is_latin1) const;
   V8_EXPORT_PRIVATE void set_code(bool is_unicode, Handle<Code> code);
   // This could be a Smi kUninitializedValue or ByteArray.
-  V8_EXPORT_PRIVATE Object bytecode(bool is_latin1) const;
+  V8_EXPORT_PRIVATE Tagged<Object> bytecode(bool is_latin1) const;
   // Sets the bytecode as well as initializing trampoline slots to the
   // RegExpInterpreterTrampoline.
   void set_bytecode_and_trampoline(Isolate* isolate,
@@ -78,7 +79,7 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   inline int max_register_count() const;
   // Number of captures (without the match itself).
   inline int capture_count() const;
-  inline Object capture_name_map();
+  inline Tagged<Object> capture_name_map();
   inline void set_capture_name_map(Handle<FixedArray> capture_name_map);
   uint32_t backtrack_limit() const;
 
@@ -97,10 +98,6 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
     if (!f.has_value()) return f;
     if (f.value() == RegExpFlag::kLinear &&
         !v8_flags.enable_experimental_regexp_engine) {
-      return {};
-    }
-    if (f.value() == RegExpFlag::kUnicodeSets &&
-        !v8_flags.harmony_regexp_unicode_sets) {
       return {};
     }
     return f;
@@ -122,7 +119,7 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   V8_EXPORT_PRIVATE static Handle<String> StringFromFlags(Isolate* isolate,
                                                           Flags flags);
 
-  inline String EscapedPattern();
+  inline Tagged<String> EscapedPattern();
 
   bool CanTierUp();
   bool MarkedForTierUp();
@@ -141,6 +138,11 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   // Each capture (including the match itself) needs two registers.
   static constexpr int RegistersForCaptureCount(int count) {
     return (count + 1) * 2;
+  }
+  static constexpr int CaptureCountForRegisters(int register_count) {
+    DCHECK_EQ(register_count % 2, 0);
+    DCHECK_GE(register_count, 2);
+    return (register_count - 2) / 2;
   }
 
   static constexpr int code_index(bool is_latin1) {
@@ -229,11 +231,11 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
 
   // Descriptor array index to important methods in the prototype.
   static constexpr int kExecFunctionDescriptorIndex = 1;
-  static constexpr int kSymbolMatchFunctionDescriptorIndex = 14;
-  static constexpr int kSymbolMatchAllFunctionDescriptorIndex = 15;
-  static constexpr int kSymbolReplaceFunctionDescriptorIndex = 16;
-  static constexpr int kSymbolSearchFunctionDescriptorIndex = 17;
-  static constexpr int kSymbolSplitFunctionDescriptorIndex = 18;
+  static constexpr int kSymbolMatchFunctionDescriptorIndex = 15;
+  static constexpr int kSymbolMatchAllFunctionDescriptorIndex = 16;
+  static constexpr int kSymbolReplaceFunctionDescriptorIndex = 17;
+  static constexpr int kSymbolSearchFunctionDescriptorIndex = 18;
+  static constexpr int kSymbolSplitFunctionDescriptorIndex = 19;
 
   // The uninitialized value for a regexp code object.
   static constexpr int kUninitializedValue = -1;
@@ -252,8 +254,8 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   using FlagsBuffer = base::EmbeddedVector<char, kFlagCount + 1>;
   inline static const char* FlagsToString(Flags flags, FlagsBuffer* out_buffer);
 
-  inline Object DataAt(int index) const;
-  inline void SetDataAt(int index, Object value);
+  inline Tagged<Object> DataAt(int index) const;
+  inline void SetDataAt(int index, Tagged<Object> value);
 
   TQ_OBJECT_CONSTRUCTORS(JSRegExp)
 };

@@ -9,6 +9,7 @@
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
+#include "src/roots/roots.h"
 
 namespace v8 {
 namespace internal {
@@ -59,6 +60,9 @@ class DependentCode : public WeakArrayList {
     // Group of code objects that depends on element transition information in
     // AllocationSites not being changed.
     kAllocationSiteTransitionChangedGroup = 1 << 8,
+    // Group of code objects that depends on a const-tracked let variable in
+    // a ScriptContext not being changed.
+    kConstTrackingLetChangedGroup = 1 << 9,
     // IMPORTANT: The last bit must fit into a Smi, i.e. into 31 bits.
   };
   using DependencyGroups = base::Flags<DependencyGroup, uint32_t>;
@@ -82,10 +86,11 @@ class DependentCode : public WeakArrayList {
                                          DependencyGroups groups);
 
   template <typename ObjectT>
-  static bool MarkCodeForDeoptimization(Isolate* isolate, ObjectT object,
+  static bool MarkCodeForDeoptimization(Isolate* isolate,
+                                        Tagged<ObjectT> object,
                                         DependencyGroups groups);
 
-  V8_EXPORT_PRIVATE static DependentCode empty_dependent_code(
+  V8_EXPORT_PRIVATE static Tagged<DependentCode> empty_dependent_code(
       const ReadOnlyRoots& roots);
   static constexpr RootIndex kEmptyDependentCode =
       RootIndex::kEmptyWeakArrayList;
@@ -98,7 +103,7 @@ class DependentCode : public WeakArrayList {
 
  private:
   // Get/Set {object}'s {DependentCode}.
-  static DependentCode GetDependentCode(HeapObject object);
+  static Tagged<DependentCode> GetDependentCode(Tagged<HeapObject> object);
   static void SetDependentCode(Handle<HeapObject> object,
                                Handle<DependentCode> dep);
 
@@ -113,9 +118,10 @@ class DependentCode : public WeakArrayList {
   void DeoptimizeDependencyGroups(Isolate* isolate, DependencyGroups groups);
 
   // The callback is called for all non-cleared entries, and should return true
-  // iff the current entry should be cleared.
-  using IterateAndCompactFn = std::function<bool(Code, DependencyGroups)>;
-  void IterateAndCompact(const IterateAndCompactFn& fn);
+  // iff the current entry should be cleared. The Function template argument
+  // must be of type: bool (Tagged<Code>, DependencyGroups).
+  template <typename Function>
+  void IterateAndCompact(IsolateForSandbox isolate, const Function& fn);
 
   // Fills the given entry with the last non-cleared entry in this list, and
   // returns the new length after the last non-cleared entry has been moved.

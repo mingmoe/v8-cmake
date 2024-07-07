@@ -76,18 +76,18 @@ TEST(Promotion) {
   }
 }
 
-// This is the same as Factory::NewMap, except it doesn't retry on
-// allocation failure.
+// This is the same as Factory::NewContextfulMapForCurrentContext, except it
+// doesn't retry on allocation failure.
 AllocationResult HeapTester::AllocateMapForTest(Isolate* isolate) {
   Heap* heap = isolate->heap();
-  HeapObject obj;
+  Tagged<HeapObject> obj;
   AllocationResult alloc = heap->AllocateRaw(Map::kSize, AllocationType::kMap);
   if (!alloc.To(&obj)) return alloc;
-  obj.set_map_after_allocation(ReadOnlyRoots(heap).meta_map(),
-                               SKIP_WRITE_BARRIER);
+  ReadOnlyRoots roots(isolate);
+  obj->set_map_after_allocation(*isolate->meta_map());
   return AllocationResult::FromObject(isolate->factory()->InitializeMap(
       Map::cast(obj), JS_OBJECT_TYPE, JSObject::kHeaderSize,
-      TERMINAL_FAST_ELEMENTS_KIND, 0, heap));
+      TERMINAL_FAST_ELEMENTS_KIND, 0, roots));
 }
 
 // This is the same as Factory::NewFixedArray, except it doesn't retry
@@ -96,17 +96,17 @@ AllocationResult HeapTester::AllocateFixedArrayForTest(
     Heap* heap, int length, AllocationType allocation) {
   DCHECK(length >= 0 && length <= FixedArray::kMaxLength);
   int size = FixedArray::SizeFor(length);
-  HeapObject obj;
+  Tagged<HeapObject> obj;
   {
     AllocationResult result = heap->AllocateRaw(size, allocation);
     if (!result.To(&obj)) return result;
   }
-  obj.set_map_after_allocation(ReadOnlyRoots(heap).fixed_array_map(),
-                               SKIP_WRITE_BARRIER);
-  FixedArray array = FixedArray::cast(obj);
-  array.set_length(length);
-  MemsetTagged(array.data_start(), ReadOnlyRoots(heap).undefined_value(),
-               length);
+  obj->set_map_after_allocation(ReadOnlyRoots(heap).fixed_array_map(),
+                                SKIP_WRITE_BARRIER);
+  Tagged<FixedArray> array = FixedArray::cast(obj);
+  array->set_length(length);
+  MemsetTagged(array->RawFieldOfFirstElement(),
+               ReadOnlyRoots(heap).undefined_value(), length);
   return AllocationResult::FromObject(array);
 }
 
@@ -119,7 +119,7 @@ HEAP_TEST(MarkCompactCollector) {
   Factory* factory = isolate->factory();
 
   v8::HandleScope sc(CcTest::isolate());
-  Handle<JSGlobalObject> global(isolate->context().global_object(), isolate);
+  Handle<JSGlobalObject> global(isolate->context()->global_object(), isolate);
 
   // call mark-compact when heap is empty
   heap::InvokeMajorGC(heap);
@@ -160,7 +160,7 @@ HEAP_TEST(MarkCompactCollector) {
     CHECK(Just(true) == JSReceiver::HasOwnProperty(isolate, global, func_name));
     Handle<Object> func_value =
         Object::GetProperty(isolate, global, func_name).ToHandleChecked();
-    CHECK(func_value->IsJSFunction());
+    CHECK(IsJSFunction(*func_value));
     Handle<JSFunction> function = Handle<JSFunction>::cast(func_value);
     Handle<JSObject> obj = factory->NewJSObject(function);
 
@@ -178,7 +178,7 @@ HEAP_TEST(MarkCompactCollector) {
     CHECK(Just(true) == JSReceiver::HasOwnProperty(isolate, global, obj_name));
     Handle<Object> object =
         Object::GetProperty(isolate, global, obj_name).ToHandleChecked();
-    CHECK(object->IsJSObject());
+    CHECK(IsJSObject(*object));
     Handle<String> prop_name = factory->InternalizeUtf8String("theSlot");
     CHECK_EQ(*Object::GetProperty(isolate, object, prop_name).ToHandleChecked(),
              Smi::FromInt(23));
@@ -202,20 +202,20 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
       heap, static_cast<int>(MemoryChunkLayout::AllocatableMemoryInDataPage()),
       AllocationType::kOld);
 
-  Page* page = Page::FromHeapObject(*handles.front());
+  MemoryChunk* chunk = MemoryChunk::FromHeapObject(*handles.front());
 
   CHECK(heap->InSpace(*handles.front(), OLD_SPACE));
-  page->SetFlag(MemoryChunk::PINNED);
+  chunk->SetFlagNonExecutable(MemoryChunk::PINNED);
 
   heap::InvokeMajorGC(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
 
   // The pinned flag should prevent the page from moving.
   for (Handle<FixedArray> object : handles) {
-    CHECK_EQ(page, Page::FromHeapObject(*object));
+    CHECK_EQ(chunk, MemoryChunk::FromHeapObject(*object));
   }
 
-  page->ClearFlag(MemoryChunk::PINNED);
+  chunk->ClearFlagNonExecutable(MemoryChunk::PINNED);
 
   heap::InvokeMajorGC(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
@@ -223,7 +223,7 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
   // `compact_on_every_full_gc` ensures that this page is an evacuation
   // candidate, so with the pin flag cleared compaction should now move it.
   for (Handle<FixedArray> object : handles) {
-    CHECK_NE(page, Page::FromHeapObject(*object));
+    CHECK_NE(chunk, MemoryChunk::FromHeapObject(*object));
   }
 }
 
@@ -356,10 +356,10 @@ TEST(Regress5829) {
   // Right trim the array without clearing the mark bits.
   array->set_length(9);
   heap->CreateFillerObjectAt(old_end - kTaggedSize, kTaggedSize);
-  heap->old_space()->FreeLinearAllocationArea();
-  Page* page = Page::FromAddress(array->address());
+  heap->FreeMainThreadLinearAllocationAreas();
+  PageMetadata* page = PageMetadata::FromAddress(array->address());
   for (auto object_and_size : LiveObjectRange(page)) {
-    CHECK(!object_and_size.first.IsFreeSpaceOrFiller());
+    CHECK(!IsFreeSpaceOrFiller(object_and_size.first));
   }
 }
 

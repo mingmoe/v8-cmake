@@ -21,19 +21,42 @@
 #include "unicode/locid.h"
 #include "unicode/uversion.h"
 
-#define V8_MINIMUM_ICU_VERSION 71
+#define V8_MINIMUM_ICU_VERSION 73
 
 namespace U_ICU_NAMESPACE {
 class BreakIterator;
+class Locale;
+class ListFormatter;
+class RelativeDateTimeFormatter;
+class SimpleDateFormat;
+class DateIntervalFormat;
+class PluralRules;
 class Collator;
 class FormattedValue;
 class StringEnumeration;
 class TimeZone;
 class UnicodeString;
+namespace number {
+class LocalizedNumberFormatter;
+}  //  namespace number
 }  // namespace U_ICU_NAMESPACE
 
 namespace v8 {
 namespace internal {
+
+#define ICU_EXTERNAL_POINTER_TAG_LIST(V)                              \
+  V(icu::UnicodeString, kIcuUnicodeStringTag)                         \
+  V(icu::BreakIterator, kIcuBreakIteratorTag)                         \
+  V(icu::Locale, kIcuLocaleTag)                                       \
+  V(icu::SimpleDateFormat, kIcuSimpleDateFormatTag)                   \
+  V(icu::DateIntervalFormat, kIcuDateIntervalFormatTag)               \
+  V(icu::RelativeDateTimeFormatter, kIcuRelativeDateTimeFormatterTag) \
+  V(icu::ListFormatter, kIcuListFormatterTag)                         \
+  V(icu::Collator, kIcuCollatorTag)                                   \
+  V(icu::PluralRules, kIcuPluralRulesTag)                             \
+  V(icu::number::LocalizedNumberFormatter, kIcuLocalizedNumberFormatterTag)
+ICU_EXTERNAL_POINTER_TAG_LIST(ASSIGN_EXTERNAL_POINTER_TAG_FOR_MANAGED)
+#undef ICU_EXTERNAL_POINTER_TAG_LIST
 
 struct NumberFormatSpan {
   int32_t field_id;
@@ -48,8 +71,6 @@ struct NumberFormatSpan {
 V8_EXPORT_PRIVATE std::vector<NumberFormatSpan> FlattenRegionsToParts(
     std::vector<NumberFormatSpan>* regions);
 
-template <typename T>
-class Handle;
 class JSCollator;
 
 class Intl {
@@ -161,6 +182,29 @@ class Intl {
     kLessPrecision,
   };
 
+  // [[RoundingMode]] is one of the String values "ceil", "floor", "expand",
+  // "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", or "halfEven",
+  // specifying the rounding strategy for the number.
+  enum class RoundingMode {
+    kCeil,
+    kFloor,
+    kExpand,
+    kTrunc,
+    kHalfCeil,
+    kHalfFloor,
+    kHalfExpand,
+    kHalfTrunc,
+    kHalfEven,
+  };
+
+  // [[TrailingZeroDisplay]] is one of the String values "auto" or
+  // "stripIfInteger", specifying the strategy for displaying trailing zeros on
+  // whole number.
+  enum class TrailingZeroDisplay {
+    kAuto,
+    kStripIfInteger,
+  };
+
   // ecma402/#sec-setnfdigitoptions
   struct NumberFormatDigitOptions {
     int minimum_integer_digits;
@@ -170,11 +214,14 @@ class Intl {
     int maximum_significant_digits;
     RoundingPriority rounding_priority;
     RoundingType rounding_type;
+    int rounding_increment;
+    RoundingMode rounding_mode;
+    TrailingZeroDisplay trailing_zero_display;
   };
   V8_WARN_UNUSED_RESULT static Maybe<NumberFormatDigitOptions>
   SetNumberFormatDigitOptions(Isolate* isolate, Handle<JSReceiver> options,
                               int mnfd_default, int mxfd_default,
-                              bool notation_is_compact);
+                              bool notation_is_compact, const char* service);
 
   // Helper function to convert a UnicodeString to a Handle<String>
   V8_WARN_UNUSED_RESULT static MaybeHandle<String> ToString(
@@ -210,6 +257,12 @@ class Intl {
                          Handle<String> field_type_string, Handle<String> value,
                          Handle<String> additional_property_name,
                          Handle<String> additional_property_value);
+
+  // A helper function to implement formatToParts which add element to array
+  static Maybe<int> AddNumberElements(Isolate* isolate,
+                                      const icu::FormattedValue& formatted,
+                                      Handle<JSArray> result, int start_index,
+                                      Handle<String> unit);
 
   // In ECMA 402 v1, Intl constructors supported a mode of operation
   // where calling them with an existing object as a receiver would
@@ -328,7 +381,8 @@ class Intl {
   static const uint8_t* AsciiCollationWeightsL3();
   static const int kAsciiCollationWeightsLength;
 
-  static String ConvertOneByteToLower(String src, String dst);
+  static Tagged<String> ConvertOneByteToLower(Tagged<String> src,
+                                              Tagged<String> dst);
 
   static const std::set<std::string>& GetAvailableLocales();
 

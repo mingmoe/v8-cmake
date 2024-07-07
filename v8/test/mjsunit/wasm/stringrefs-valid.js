@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc --experimental-wasm-stringref
+// Flags: --experimental-wasm-stringref
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
@@ -32,12 +32,29 @@ for (let [name, code] of [['string', kStringRefCode],
   assertValid(b => b.addStruct([makeField(code, true)]));
   assertValid(b => b.addArray(code, true));
   assertValid(b => b.addType(makeSig([], [code])));
-  assertValid(b => b.addGlobal(code, true, default_init));
-  assertValid(b => b.addTable(code, 0));
-  assertValid(b => b.addPassiveElementSegment([default_init], code));
   assertValid(b => b.addTag(makeSig([code], [])));
   assertValid(
     b => b.addFunction(undefined, kSig_v_v).addLocals(code, 1).addBody([]));
+  if (name.startsWith("stringview_")) {
+    // String views aren't defaultable because they aren't nullable.
+    assertInvalid(b => b.addGlobal(code, true, false, default_init));
+    assertInvalid(b => b.addTable(code, 0));
+    assertInvalid(b => b.addPassiveElementSegment([default_init], code));
+    assertInvalid(
+        b => b.addFunction(undefined, kSig_v_v).addLocals(code, 1).addBody([
+          kExprLocalGet, 0,
+          kExprDrop,
+        ]));
+    assertInvalid(
+        b => b.addFunction(undefined, kSig_v_v).addBody([
+          kExprRefNull, code,
+          kExprDrop,
+        ]));
+    } else {
+    assertValid(b => b.addGlobal(code, true, false, default_init));
+    assertValid(b => b.addTable(code, 0));
+    assertValid(b => b.addPassiveElementSegment([default_init], code));
+  }
 }
 
 let kSig_w_i = makeSig([kWasmI32], [kWasmStringRef]);
@@ -71,7 +88,7 @@ let kSig_w_zi = makeSig([kWasmStringViewIter, kWasmI32],
 (function TestInstructions() {
   let builder = new WasmModuleBuilder();
 
-  builder.addMemory(0, undefined, false, false);
+  builder.addMemory(0, undefined);
 
   builder.addFunction("string.new_utf8", kSig_w_ii)
     .addBody([
@@ -357,7 +374,7 @@ assertInvalid(
 
 assertInvalid(
   builder => {
-    builder.addMemory(0, undefined, false, false);
+    builder.addMemory(0, undefined);
     builder.addFunction("string.new_wtf8/bad-mem", kSig_w_ii)
       .addBody([
         kExprLocalGet, 0, kExprLocalGet, 1,
@@ -378,7 +395,7 @@ assertInvalid(
 
 assertInvalid(
   builder => {
-    builder.addMemory(0, undefined, false, false);
+    builder.addMemory(0, undefined);
     builder.addFunction("string.encode_wtf8/bad-mem", kSig_i_wi)
       .addBody([
         kExprLocalGet, 0, kExprLocalGet, 1,

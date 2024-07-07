@@ -834,6 +834,7 @@ bool operator==(AssertNotNullParameters const& lhs,
   V(ChangeTaggedToFloat64, Operator::kNoProperties, 1, 0)         \
   V(ChangeTaggedToTaggedSigned, Operator::kNoProperties, 1, 0)    \
   V(ChangeFloat64ToTaggedPointer, Operator::kNoProperties, 1, 0)  \
+  V(ChangeFloat64HoleToTagged, Operator::kNoProperties, 1, 0)     \
   V(ChangeInt31ToTaggedSigned, Operator::kNoProperties, 1, 0)     \
   V(ChangeInt32ToTagged, Operator::kNoProperties, 1, 0)           \
   V(ChangeInt64ToTagged, Operator::kNoProperties, 1, 0)           \
@@ -933,6 +934,7 @@ bool operator==(AssertNotNullParameters const& lhs,
   V(CheckNumber, 1, 1)                   \
   V(CheckSmi, 1, 1)                      \
   V(CheckString, 1, 1)                   \
+  V(CheckStringOrStringWrapper, 1, 1)    \
   V(CheckBigInt, 1, 1)                   \
   V(CheckedBigIntToBigInt64, 1, 1)       \
   V(CheckedInt32ToTaggedSigned, 1, 1)    \
@@ -1182,7 +1184,7 @@ struct SimplifiedOperatorGlobalCache final {
               IrOpcode::kConvertReceiver,  // opcode
               Operator::kEliminatable,     // flags
               "ConvertReceiver",           // name
-              2, 1, 1, 1, 1, 0,            // counts
+              3, 1, 1, 1, 1, 0,            // counts
               kMode) {}                    // param
   };
   ConvertReceiverOperator<ConvertReceiverMode::kAny>
@@ -1567,15 +1569,15 @@ const Operator* SimplifiedOperatorBuilder::StringPrepareForGetCodeunit() {
   return &cache_.kStringPrepareForGetCodeunit;
 }
 
-const Operator* SimplifiedOperatorBuilder::WasmExternInternalize() {
-  return zone()->New<Operator>(IrOpcode::kWasmExternInternalize,
-                               Operator::kEliminatable, "WasmExternInternalize",
+const Operator* SimplifiedOperatorBuilder::WasmAnyConvertExtern() {
+  return zone()->New<Operator>(IrOpcode::kWasmAnyConvertExtern,
+                               Operator::kEliminatable, "WasmAnyConvertExtern",
                                1, 1, 1, 1, 1, 1);
 }
 
-const Operator* SimplifiedOperatorBuilder::WasmExternExternalize() {
-  return zone()->New<Operator>(IrOpcode::kWasmExternExternalize,
-                               Operator::kEliminatable, "WasmExternExternalize",
+const Operator* SimplifiedOperatorBuilder::WasmExternConvertAny() {
+  return zone()->New<Operator>(IrOpcode::kWasmExternConvertAny,
+                               Operator::kEliminatable, "WasmExternConvertAny",
                                1, 1, 1, 1, 1, 1);
 }
 
@@ -2115,11 +2117,10 @@ const Operator* SimplifiedOperatorBuilder::Allocate(Type type,
 }
 
 const Operator* SimplifiedOperatorBuilder::AllocateRaw(
-    Type type, AllocationType allocation,
-    AllowLargeObjects allow_large_objects) {
+    Type type, AllocationType allocation) {
   return zone()->New<Operator1<AllocateParameters>>(
       IrOpcode::kAllocateRaw, Operator::kEliminatable, "AllocateRaw", 1, 1, 1,
-      1, 1, 1, AllocateParameters(type, allocation, allow_large_objects));
+      1, 1, 1, AllocateParameters(type, allocation));
 }
 
 #define SPECULATIVE_NUMBER_BINOP(Name)                                        \
@@ -2266,8 +2267,8 @@ const Operator* SimplifiedOperatorBuilder::FastApiCall(
       static_cast<int>(descriptor->ParameterCount()) +  // slow call
       FastApiCallNode::kEffectAndControlInputCount;
   return zone()->New<Operator1<FastApiCallParameters>>(
-      IrOpcode::kFastApiCall, Operator::kNoThrow, "FastApiCall",
-      value_input_count, 1, 1, 1, 1, 0,
+      IrOpcode::kFastApiCall, Operator::kNoProperties, "FastApiCall",
+      value_input_count, 1, 1, 1, 1, 2,
       FastApiCallParameters(c_functions, feedback, descriptor));
 }
 

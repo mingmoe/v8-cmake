@@ -47,8 +47,8 @@ Reduction WasmGCOperatorReducer::Reduce(Node* node) {
       return ReduceWasmTypeCastAbstract(node);
     case IrOpcode::kTypeGuard:
       return ReduceTypeGuard(node);
-    case IrOpcode::kWasmExternInternalize:
-      return ReduceWasmExternInternalize(node);
+    case IrOpcode::kWasmAnyConvertExtern:
+      return ReduceWasmAnyConvertExtern(node);
     case IrOpcode::kMerge:
       return ReduceMerge(node);
     case IrOpcode::kIfTrue:
@@ -72,6 +72,7 @@ Reduction WasmGCOperatorReducer::Reduce(Node* node) {
 namespace {
 bool InDeadBranch(Node* node) {
   return node->opcode() == IrOpcode::kDead ||
+         node->opcode() == IrOpcode::kDeadValue ||
          NodeProperties::GetType(node).AsWasm().type.is_uninhabited();
 }
 
@@ -85,15 +86,6 @@ Node* GetAlias(Node* node) {
     default:
       return nullptr;
   }
-}
-
-bool IsImplicitInternalization(wasm::ValueType from, wasm::ValueType to,
-                               const wasm::WasmModule* to_module) {
-  return from.is_object_reference() &&
-         from.heap_representation() == wasm::HeapType::kExtern &&
-         to.is_object_reference() &&
-         wasm::IsHeapSubtypeOf(to.heap_type(),
-                               wasm::HeapType(wasm::HeapType::kAny), to_module);
 }
 
 }  // namespace
@@ -129,7 +121,10 @@ Reduction WasmGCOperatorReducer::ReduceStart(Node* node) {
 
 wasm::TypeInModule WasmGCOperatorReducer::ObjectTypeFromContext(
     Node* object, Node* control, bool allow_non_wasm) {
-  if (object->opcode() == IrOpcode::kDead) return {};
+  if (object->opcode() == IrOpcode::kDead ||
+      object->opcode() == IrOpcode::kDeadValue) {
+    return {};
+  }
   if (!IsReduced(control)) return {};
   if (allow_non_wasm && !NodeProperties::IsTyped(object)) return {};
   Type raw_type = NodeProperties::GetType(object);
@@ -143,13 +138,6 @@ wasm::TypeInModule WasmGCOperatorReducer::ObjectTypeFromContext(
     type_from_state = state.LookupState(object);
   }
   if (!type_from_state.IsSet()) return type_from_node;
-  // When abstract casts have performed implicit internalization (see
-  // {ReduceWasmTypeCastAbstract} below), we may encounter the results
-  // of that here.
-  if (IsImplicitInternalization(type_from_node.type, type_from_state.type.type,
-                                type_from_state.type.module)) {
-    return type_from_state.type;
-  }
   return wasm::Intersection(type_from_node, type_from_state.type);
 }
 
@@ -337,14 +325,20 @@ Reduction WasmGCOperatorReducer::ReduceCheckNull(Node* node) {
   return NoChange();
 }
 
-Reduction WasmGCOperatorReducer::ReduceWasmExternInternalize(Node* node) {
-  DCHECK_EQ(node->opcode(), IrOpcode::kWasmExternInternalize);
-  // Remove redundant extern.internalize(extern.externalize(...)) pattern.
-  Node* object = NodeProperties::GetValueInput(node, 0);
-  if (object->opcode() == IrOpcode::kDead) return NoChange();
-  if (object->opcode() == IrOpcode::kWasmExternExternalize) {
-    Node* externalize = node->InputAt(0);
-    Node* input = externalize->InputAt(0);
+Reduction WasmGCOperatorReducer::ReduceWasmAnyConvertExtern(Node* node) {
+  DCHECK_EQ(node->opcode(), IrOpcode::kWasmAnyConvertExtern);
+  // Remove redundant any.convert_extern(extern.convert_any(...)) pattern.
+  Node* input = NodeProperties::GetValueInput(node, 0);
+  while (input->opcode() == IrOpcode::kTypeGuard) {
+    input = NodeProperties::GetValueInput(input, 0);
+  }
+  if (input->opcode() == IrOpcode::kDead ||
+      input->opcode() == IrOpcode::kDeadValue) {
+    return NoChange();
+  }
+  if (input->opcode() == IrOpcode::kWasmExternConvertAny) {
+    // "Skip" the extern.convert_any which doesn't have an effect on the value.
+    input = NodeProperties::GetValueInput(input, 0);
     ReplaceWithValue(node, input);
     node->Kill();
     return Replace(input);
@@ -471,12 +465,7 @@ Reduction WasmGCOperatorReducer::ReduceWasmTypeCastAbstract(Node* node) {
     }
   }
 
-  // This can never result from user code, only from internal shortcuts,
-  // e.g. when using externrefs as strings.
-  const bool implicit_internalize =
-      IsImplicitInternalization(config.from, config.to, object_type.module);
-  if (!implicit_internalize &&
-      wasm::HeapTypesUnrelated(object_type.type.heap_type(),
+  if (wasm::HeapTypesUnrelated(object_type.type.heap_type(),
                                config.to.heap_type(), object_type.module,
                                object_type.module)) {
     gasm_.InitializeEffectControl(effect, control);
@@ -500,9 +489,7 @@ Reduction WasmGCOperatorReducer::ReduceWasmTypeCastAbstract(Node* node) {
                                      {object_type.type, config.to}));
 
   wasm::TypeInModule new_type =
-      implicit_internalize
-          ? wasm::TypeInModule{config.to, module_}
-          : wasm::Intersection(object_type, {config.to, module_});
+      wasm::Intersection(object_type, {config.to, module_});
 
   return UpdateNodeAndAliasesTypes(node, GetState(control), node, new_type,
                                    false);

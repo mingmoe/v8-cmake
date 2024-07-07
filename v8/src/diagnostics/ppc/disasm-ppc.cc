@@ -471,8 +471,8 @@ void Decoder::DecodeExtP(Instruction* instr) {
       // Read prefix.
       SetAsPrefixed(instr->Bits(17, 0));
       // Read suffix (next instruction).
-      Instruction* next_instr = base::bit_cast<Instruction*>(
-          base::bit_cast<intptr_t>(instr) + kInstrSize);
+      Instruction* next_instr = reinterpret_cast<Instruction*>(
+          reinterpret_cast<intptr_t>(instr) + kInstrSize);
       switch (next_instr->OpcodeBase()) {
           // Prefixed ADDI.
         case (ADDI): {
@@ -1535,13 +1535,13 @@ void Decoder::DecodeExt6(Instruction* instr) {
     }
   }
   switch (EXT6 | (instr->BitField(10, 3))) {
-#define DECODE_XX3_VECTOR_INSTRUCTIONS(name, opcode_name, opcode_value) \
-  case opcode_name: {                                                   \
-    Format(instr, #name " 'Xt, 'Xa, 'Xb");                              \
-    return;                                                             \
+#define DECODE_XX3_VECTOR_B_FORM_INSTRUCTIONS(name, opcode_name, opcode_value) \
+  case opcode_name: {                                                          \
+    Format(instr, #name " 'Xt, 'Xa, 'Xb");                                     \
+    return;                                                                    \
   }
-    PPC_XX3_OPCODE_VECTOR_LIST(DECODE_XX3_VECTOR_INSTRUCTIONS)
-#undef DECODE_XX3_VECTOR_INSTRUCTIONS
+    PPC_XX3_OPCODE_VECTOR_B_FORM_LIST(DECODE_XX3_VECTOR_B_FORM_INSTRUCTIONS)
+#undef DECODE_XX3_VECTOR_B_FORM_INSTRUCTIONS
 #define DECODE_XX3_SCALAR_INSTRUCTIONS(name, opcode_name, opcode_value) \
   case opcode_name: {                                                   \
     Format(instr, #name " 'Dt, 'Da, 'Db");                              \
@@ -1593,8 +1593,8 @@ int Decoder::InstructionDecode(uint8_t* instr_ptr) {
   } else {
     // Prefixed instructions have a 4-byte prefix and a 4-byte suffix. Print
     // both on the same line.
-    Instruction* next_instr = base::bit_cast<Instruction*>(
-        base::bit_cast<intptr_t>(instr) + kInstrSize);
+    Instruction* next_instr = reinterpret_cast<Instruction*>(
+        reinterpret_cast<intptr_t>(instr) + kInstrSize);
     out_buffer_pos_ +=
         base::SNPrintF(out_buffer_ + out_buffer_pos_, "%08x|%08x ",
                        instr->InstructionBits(), next_instr->InstructionBits());

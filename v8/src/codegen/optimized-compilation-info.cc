@@ -80,8 +80,13 @@ void OptimizedCompilationInfo::ConfigureFlags() {
     case CodeKind::BYTECODE_HANDLER:
       set_called_with_code_start_register();
       if (v8_flags.turbo_splitting) set_splitting();
+      if (v8_flags.enable_allocation_folding) set_allocation_folding();
       break;
     case CodeKind::BUILTIN:
+#ifdef V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
+      set_switch_jump_table();
+#endif  // V8_TARGET_ARCH_X64
+      [[fallthrough]];
     case CodeKind::FOR_TESTING:
       if (v8_flags.turbo_splitting) set_splitting();
       if (v8_flags.enable_allocation_folding) set_allocation_folding();
@@ -94,7 +99,6 @@ void OptimizedCompilationInfo::ConfigureFlags() {
       set_switch_jump_table();
       break;
     case CodeKind::C_WASM_ENTRY:
-    case CodeKind::JS_TO_JS_FUNCTION:
     case CodeKind::JS_TO_WASM_FUNCTION:
     case CodeKind::WASM_TO_JS_FUNCTION:
       break;
@@ -197,7 +201,7 @@ bool OptimizedCompilationInfo::has_context() const {
   return !closure().is_null();
 }
 
-Context OptimizedCompilationInfo::context() const {
+Tagged<Context> OptimizedCompilationInfo::context() const {
   DCHECK(has_context());
   return closure()->context();
 }
@@ -206,7 +210,7 @@ bool OptimizedCompilationInfo::has_native_context() const {
   return !closure().is_null() && !closure()->native_context().is_null();
 }
 
-NativeContext OptimizedCompilationInfo::native_context() const {
+Tagged<NativeContext> OptimizedCompilationInfo::native_context() const {
   DCHECK(has_native_context());
   return closure()->native_context();
 }
@@ -215,9 +219,9 @@ bool OptimizedCompilationInfo::has_global_object() const {
   return has_native_context();
 }
 
-JSGlobalObject OptimizedCompilationInfo::global_object() const {
+Tagged<JSGlobalObject> OptimizedCompilationInfo::global_object() const {
   DCHECK(has_global_object());
-  return native_context().global_object();
+  return native_context()->global_object();
 }
 
 int OptimizedCompilationInfo::AddInlinedFunction(

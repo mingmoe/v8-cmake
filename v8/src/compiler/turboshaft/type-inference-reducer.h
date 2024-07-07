@@ -11,8 +11,8 @@
 #include "src/base/vector.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/turboshaft/assembler.h"
+#include "src/compiler/turboshaft/copying-phase.h"
 #include "src/compiler/turboshaft/operations.h"
-#include "src/compiler/turboshaft/optimization-phase.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/turboshaft/sidetable.h"
 #include "src/compiler/turboshaft/snapshot-table.h"
@@ -79,7 +79,7 @@ class TypeInferenceReducer
   using table_t = SnapshotTable<Type>;
 
  public:
-  TURBOSHAFT_REDUCER_BOILERPLATE()
+  TURBOSHAFT_REDUCER_BOILERPLATE(TypeInference)
 
   using Adapter = UniformReducerAdapter<TypeInferenceReducer, Next>;
   using Args = TypeInferenceReducerArgs;
@@ -190,8 +190,7 @@ class TypeInferenceReducer
     // Collect the snapshots of all predecessors.
     {
       predecessors_.clear();
-      for (const Block* pred = new_block->LastPredecessor(); pred != nullptr;
-           pred = pred->NeighboringPredecessor()) {
+      for (const Block* pred : new_block->PredecessorsIterable()) {
         base::Optional<table_t::Snapshot> pred_snapshot =
             block_to_snapshot_mapping_[pred->index()];
         DCHECK(pred_snapshot.has_value());
@@ -221,7 +220,7 @@ class TypeInferenceReducer
     // types.
     if (args_.output_graph_typing ==
         Args::OutputGraphTyping::kRefineFromInputGraph) {
-      if (new_block->HasExactlyNPredecessors(1)) {
+      if (new_block->PredecessorCount() == 1) {
         Block* predecessor = new_block->LastPredecessor();
         const Operation& terminator =
             predecessor->LastOperation(Asm().output_graph());
@@ -282,9 +281,8 @@ class TypeInferenceReducer
     }
   }
 
-  OpIndex REDUCE(PendingLoopPhi)(OpIndex first, RegisterRepresentation rep,
-                                 PendingLoopPhiOp::Data data) {
-    OpIndex index = Next::ReducePendingLoopPhi(first, rep, data);
+  OpIndex REDUCE(PendingLoopPhi)(OpIndex first, RegisterRepresentation rep) {
+    OpIndex index = Next::ReducePendingLoopPhi(first, rep);
     if (!NeedsTyping(index)) return index;
 
     // There is not much we can do for pending loop phis, because we don't know
@@ -317,9 +315,9 @@ class TypeInferenceReducer
     return index;
   }
 
-  OpIndex REDUCE(Comparison)(OpIndex left, OpIndex right,
-                             ComparisonOp::Kind kind,
-                             RegisterRepresentation rep) {
+  V<Word32> REDUCE(Comparison)(V<Any> left, V<Any> right,
+                               ComparisonOp::Kind kind,
+                               RegisterRepresentation rep) {
     OpIndex index = Next::ReduceComparison(left, right, kind, rep);
     if (!NeedsTyping(index)) return index;
 
@@ -329,9 +327,9 @@ class TypeInferenceReducer
     return index;
   }
 
-  OpIndex REDUCE(Projection)(OpIndex input, uint16_t idx,
-                             RegisterRepresentation rep) {
-    OpIndex index = Next::ReduceProjection(input, idx, rep);
+  V<Any> REDUCE(Projection)(V<Any> input, uint16_t idx,
+                            RegisterRepresentation rep) {
+    V<Any> index = Next::ReduceProjection(input, idx, rep);
     if (!NeedsTyping(index)) return index;
 
     Type type = Typer::TypeProjection(GetType(input), idx);
@@ -339,9 +337,9 @@ class TypeInferenceReducer
     return index;
   }
 
-  OpIndex REDUCE(WordBinop)(OpIndex left, OpIndex right, WordBinopOp::Kind kind,
+  V<Word> REDUCE(WordBinop)(V<Word> left, V<Word> right, WordBinopOp::Kind kind,
                             WordRepresentation rep) {
-    OpIndex index = Next::ReduceWordBinop(left, right, kind, rep);
+    V<Word> index = Next::ReduceWordBinop(left, right, kind, rep);
     if (!NeedsTyping(index)) return index;
 
     Type type = Typer::TypeWordBinop(GetType(left), GetType(right), kind, rep,
@@ -350,7 +348,7 @@ class TypeInferenceReducer
     return index;
   }
 
-  OpIndex REDUCE(OverflowCheckedBinop)(OpIndex left, OpIndex right,
+  OpIndex REDUCE(OverflowCheckedBinop)(V<Word> left, V<Word> right,
                                        OverflowCheckedBinopOp::Kind kind,
                                        WordRepresentation rep) {
     OpIndex index = Next::ReduceOverflowCheckedBinop(left, right, kind, rep);
@@ -362,9 +360,10 @@ class TypeInferenceReducer
     return index;
   }
 
-  OpIndex REDUCE(FloatBinop)(OpIndex left, OpIndex right,
-                             FloatBinopOp::Kind kind, FloatRepresentation rep) {
-    OpIndex index = Next::ReduceFloatBinop(left, right, kind, rep);
+  V<Float> REDUCE(FloatBinop)(V<Float> left, V<Float> right,
+                              FloatBinopOp::Kind kind,
+                              FloatRepresentation rep) {
+    V<Float> index = Next::ReduceFloatBinop(left, right, kind, rep);
     if (!NeedsTyping(index)) return index;
 
     Type type = Typer::TypeFloatBinop(GetType(left), GetType(right), kind, rep,
@@ -406,7 +405,7 @@ class TypeInferenceReducer
   }
 
   void RemoveLast(OpIndex index_of_last_operation) {
-    if (auto key_opt = op_to_key_mapping_[index_of_last_operation]) {
+    if (op_to_key_mapping_[index_of_last_operation]) {
       op_to_key_mapping_[index_of_last_operation] = base::nullopt;
       TURBOSHAFT_TRACE_TYPING_OK(
           "REM  %3d:%-40s %-40s\n", index_of_last_operation.id(),
@@ -437,7 +436,7 @@ class TypeInferenceReducer
         (og_type.IsInvalid() ? "invalid" : og_type.ToString().c_str()),
         ig_type.ToString().c_str());
 
-    SetType(index, ig_type);
+    RefineOperationType(Asm().current_block(), index, ig_type, 'I');
   }
 
   Type GetTypeOrInvalid(OpIndex index) {
@@ -445,11 +444,24 @@ class TypeInferenceReducer
     return Type::Invalid();
   }
 
+  Type GetTupleType(const TupleOp& tuple) {
+    base::SmallVector<Type, 4> tuple_types;
+    for (OpIndex input : tuple.inputs()) {
+      tuple_types.push_back(GetType(input));
+    }
+    return TupleType::Tuple(base::VectorOf(tuple_types), Asm().graph_zone());
+  }
+
   Type GetType(OpIndex index) {
     Type type = GetTypeOrInvalid(index);
     if (type.IsInvalid()) {
       const Operation& op = Asm().output_graph().Get(index);
-      return Typer::TypeForRepresentation(op.outputs_rep(), Asm().graph_zone());
+      if (op.Is<TupleOp>()) {
+        return GetTupleType(op.Cast<TupleOp>());
+      } else {
+        return Typer::TypeForRepresentation(op.outputs_rep(),
+                                            Asm().graph_zone());
+      }
     }
     return type;
   }
@@ -536,13 +548,14 @@ class TypeInferenceReducer
   }
 
   TypeInferenceReducerArgs args_{TypeInferenceReducerArgs::Get()};
-  GrowingSidetable<Type> input_graph_types_{Asm().graph_zone()};
-  GrowingSidetable<Type>& output_graph_types_{
+  GrowingOpIndexSidetable<Type> input_graph_types_{Asm().graph_zone(),
+                                                   &Asm().input_graph()};
+  GrowingOpIndexSidetable<Type>& output_graph_types_{
       Asm().output_graph().operation_types()};
   table_t table_{Asm().phase_zone()};
   const Block* current_block_ = nullptr;
-  GrowingSidetable<base::Optional<table_t::Key>> op_to_key_mapping_{
-      Asm().phase_zone()};
+  GrowingOpIndexSidetable<base::Optional<table_t::Key>> op_to_key_mapping_{
+      Asm().phase_zone(), &Asm().output_graph()};
   GrowingBlockSidetable<base::Optional<table_t::Snapshot>>
       block_to_snapshot_mapping_{Asm().input_graph().block_count(),
                                  base::nullopt, Asm().phase_zone()};

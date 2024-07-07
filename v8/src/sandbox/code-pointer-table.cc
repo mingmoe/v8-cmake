@@ -13,15 +13,11 @@
 namespace v8 {
 namespace internal {
 
-void CodePointerTable::Initialize() {
-  InitializeTable();
-
-  // Set up the special null entry.
-  static_assert(kNullCodePointerHandle == 0);
-  at(0).MakeCodePointerEntry(kNullAddress);
+uint32_t CodePointerTable::Sweep(Space* space, Counters* counters) {
+  uint32_t num_live_entries = GenericSweep(space);
+  counters->code_pointers_count()->AddSample(num_live_entries);
+  return num_live_entries;
 }
-
-void CodePointerTable::TearDown() { TearDownTable(); }
 
 DEFINE_LAZY_LEAKY_OBJECT_GETTER(CodePointerTable,
                                 GetProcessWideCodePointerTable)

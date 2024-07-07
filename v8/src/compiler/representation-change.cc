@@ -253,6 +253,8 @@ Node* RepresentationChanger::GetRepresentationFor(
     case MachineRepresentation::kCompressed:
     case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kSandboxedPointer:
+    case MachineRepresentation::kProtectedPointer:
+    case MachineRepresentation::kIndirectPointer:
     case MachineRepresentation::kMapWord:
       UNREACHABLE();
   }
@@ -947,7 +949,7 @@ Node* RepresentationChanger::GetWord32RepresentationFor(
     } else if (output_type.Is(Type::Unsigned32())) {
       op = simplified()->ChangeTaggedToUint32();
     } else if (use_info.truncation().IsUsedAsWord32()) {
-      if (output_type.Is(Type::NumberOrOddball())) {
+      if (output_type.Is(Type::NumberOrOddballOrHole())) {
         op = simplified()->TruncateTaggedToWord32();
       } else if (use_info.type_check() == TypeCheckKind::kNumber) {
         op = simplified()->CheckedTruncateTaggedToWord32(

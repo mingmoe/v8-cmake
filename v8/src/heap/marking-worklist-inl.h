@@ -24,9 +24,11 @@ void MarkingWorklists::Update(Callback callback) {
   }
 }
 
-void MarkingWorklists::Local::Push(HeapObject object) { active_->Push(object); }
+void MarkingWorklists::Local::Push(Tagged<HeapObject> object) {
+  active_->Push(object);
+}
 
-bool MarkingWorklists::Local::Pop(HeapObject* object) {
+bool MarkingWorklists::Local::Pop(Tagged<HeapObject>* object) {
   if (active_->Pop(object)) return true;
   if (!is_per_context_mode_) return false;
   // The active worklist is empty. Find any other non-empty worklist and
@@ -34,19 +36,21 @@ bool MarkingWorklists::Local::Pop(HeapObject* object) {
   return PopContext(object);
 }
 
-void MarkingWorklists::Local::PushOnHold(HeapObject object) {
+void MarkingWorklists::Local::PushOnHold(Tagged<HeapObject> object) {
   on_hold_.Push(object);
 }
 
-bool MarkingWorklists::Local::PopOnHold(HeapObject* object) {
+bool MarkingWorklists::Local::PopOnHold(Tagged<HeapObject>* object) {
   return on_hold_.Pop(object);
 }
 
 bool MarkingWorklists::Local::SupportsExtractWrapper() {
-  return cpp_marking_state_.get();
+  return cpp_marking_state_ &&
+         cpp_marking_state_->SupportsWrappableExtraction();
 }
 
-bool MarkingWorklists::Local::ExtractWrapper(Map map, JSObject object,
+bool MarkingWorklists::Local::ExtractWrapper(Tagged<Map> map,
+                                             Tagged<JSObject> object,
                                              WrapperSnapshot& snapshot) {
   DCHECK_NOT_NULL(cpp_marking_state_);
   return cpp_marking_state_->ExtractEmbedderDataSnapshot(map, object, snapshot);

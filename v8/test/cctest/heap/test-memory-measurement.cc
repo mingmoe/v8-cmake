@@ -90,6 +90,7 @@ TEST(NativeContextStatsArrayBuffers) {
                       *i_array_buffer, 10);
   CHECK_EQ(1010, stats.Get(native_context->ptr()));
 }
+
 namespace {
 
 class TestResource : public v8::String::ExternalStringResource {
@@ -148,15 +149,18 @@ class MockPlatform : public TestPlatform {
  private:
   class MockTaskRunner : public v8::TaskRunner {
    public:
-    void PostTask(std::unique_ptr<v8::Task> task) override {}
+    void PostTaskImpl(std::unique_ptr<v8::Task> task,
+                      const SourceLocation&) override {}
 
-    void PostDelayedTask(std::unique_ptr<Task> task,
-                         double delay_in_seconds) override {
+    void PostDelayedTaskImpl(std::unique_ptr<Task> task,
+                             double delay_in_seconds,
+                             const SourceLocation&) override {
       task_ = std::move(task);
       delay_ = delay_in_seconds;
     }
 
-    void PostIdleTask(std::unique_ptr<IdleTask> task) override {
+    void PostIdleTaskImpl(std::unique_ptr<IdleTask> task,
+                          const SourceLocation&) override {
       UNREACHABLE();
     }
 
@@ -186,10 +190,7 @@ class MockMeasureMemoryDelegate : public v8::MeasureMemoryDelegate {
  public:
   bool ShouldMeasure(v8::Local<v8::Context> context) override { return true; }
 
-  void MeasurementComplete(
-      const std::vector<std::pair<v8::Local<v8::Context>, size_t>>&
-          context_sizes_in_bytes,
-      size_t unattributed_size_in_bytes) override {
+  void MeasurementComplete(Result result) override {
     // Empty.
   }
 };

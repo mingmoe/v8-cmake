@@ -228,7 +228,16 @@ bool TickSample::GetStackSample(Isolate* v8_isolate, RegisterState* regs,
   sample_info->embedder_context = nullptr;
   sample_info->context = nullptr;
 
-  if (sample_info->vm_state == GC) return true;
+  if (sample_info->vm_state == GC || v8_isolate->heap()->IsInGC()) {
+    // GC can happen any time, not directly caused by its caller. Don't collect
+    // stacks for it. We check for both GC VMState and IsInGC, since we can
+    // observe LOGGING VM states during GC.
+    // TODO(leszeks): We could still consider GC stacks (as long as this isn't a
+    // moving GC), e.g. to surface if one particular function is triggering all
+    // the GCs. However, this is a user-visible change, and we would need to
+    // adjust the symbolizer and devtools to expose this information.
+    return true;
+  }
 
   EmbedderState* embedder_state = isolate->current_embedder_state();
   if (embedder_state != nullptr) {
@@ -237,10 +246,10 @@ bool TickSample::GetStackSample(Isolate* v8_isolate, RegisterState* regs,
     sample_info->embedder_state = embedder_state->GetState();
   }
 
-  Context top_context = isolate->context();
+  Tagged<Context> top_context = isolate->context();
   if (top_context.ptr() != i::Context::kNoContext &&
       top_context.ptr() != i::Context::kInvalidContext) {
-    NativeContext top_native_context = top_context.native_context();
+    Tagged<NativeContext> top_native_context = top_context->native_context();
     sample_info->context = reinterpret_cast<void*>(top_native_context.ptr());
   }
 
@@ -316,10 +325,17 @@ bool TickSample::GetStackSample(Isolate* v8_isolate, RegisterState* regs,
   size_t i = 0;
   if (record_c_entry_frame == kIncludeCEntryFrame &&
       (it.top_frame_type() == internal::StackFrame::EXIT ||
-       it.top_frame_type() == internal::StackFrame::BUILTIN_EXIT ||
-       it.top_frame_type() == internal::StackFrame::API_CALLBACK_EXIT)) {
-    frames[i] = reinterpret_cast<void*>(isolate->c_function());
-    i++;
+       it.top_frame_type() == internal::StackFrame::BUILTIN_EXIT)) {
+    // While BUILTIN_EXIT definitely represents a call to CEntry the EXIT frame
+    // might represent either a call to CEntry or an optimized call to
+    // Api callback. In the latter case the ExternalCallbackScope points to
+    // the same function, so skip adding a frame in that case in order to avoid
+    // double-reporting.
+    void* c_function = reinterpret_cast<void*>(isolate->c_function());
+    if (sample_info->external_callback_entry != c_function) {
+      frames[i] = c_function;
+      i++;
+    }
   }
 #ifdef V8_RUNTIME_CALL_STATS
   i::RuntimeCallTimer* timer =

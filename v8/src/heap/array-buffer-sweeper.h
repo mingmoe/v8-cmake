@@ -27,7 +27,7 @@ struct ArrayBufferList final {
   size_t BytesSlow() const;
 
   void Append(ArrayBufferExtension* extension);
-  void Append(ArrayBufferList* list);
+  void Append(ArrayBufferList& list);
 
   V8_EXPORT_PRIVATE bool ContainsSlow(ArrayBufferExtension* extension) const;
 
@@ -53,14 +53,14 @@ class ArrayBufferSweeper final {
   ~ArrayBufferSweeper();
 
   void RequestSweep(SweepingType sweeping_type,
-                    TreatAllYoungAsPromoted treat_young_as_promoted);
+                    TreatAllYoungAsPromoted treat_all_young_as_promoted);
   void EnsureFinished();
 
   // Track the given ArrayBufferExtension for the given JSArrayBuffer.
-  void Append(JSArrayBuffer object, ArrayBufferExtension* extension);
+  void Append(Tagged<JSArrayBuffer> object, ArrayBufferExtension* extension);
 
   // Detaches an ArrayBufferExtension from a JSArrayBuffer.
-  void Detach(JSArrayBuffer object, ArrayBufferExtension* extension);
+  void Detach(Tagged<JSArrayBuffer> object, ArrayBufferExtension* extension);
 
   const ArrayBufferList& young() const { return young_; }
   const ArrayBufferList& old() const { return old_; }
@@ -70,15 +70,16 @@ class ArrayBufferSweeper final {
   // Bytes accounted in the old generation. Rebuilt during sweeping.
   size_t OldBytes() const { return old().ApproximateBytes(); }
 
-  bool sweeping_in_progress() const { return job_.get(); }
+  bool sweeping_in_progress() const { return state_.get(); }
+
+  uint64_t GetTraceIdForFlowEvent(GCTracer::Scope::ScopeId scope_id) const;
 
  private:
-  struct SweepingJob;
-
-  enum class SweepingState { kInProgress, kDone };
+  class SweepingState;
 
   // Finishes sweeping if it is already done.
   void FinishIfDone();
+  void Finish();
 
   // Increments external memory counters outside of ArrayBufferSweeper.
   // Increment may trigger GC.
@@ -86,20 +87,18 @@ class ArrayBufferSweeper final {
   void DecrementExternalMemoryCounters(size_t bytes);
 
   void Prepare(SweepingType type,
-               TreatAllYoungAsPromoted treat_all_young_as_promoted);
+               TreatAllYoungAsPromoted treat_all_young_as_promoted,
+               uint64_t trace_id);
   void Finalize();
 
   void ReleaseAll(ArrayBufferList* extension);
 
-  void DoSweep();
+  static void FinalizeAndDelete(ArrayBufferExtension* extension);
 
   Heap* const heap_;
-  std::unique_ptr<SweepingJob> job_;
-  base::Mutex sweeping_mutex_;
-  base::ConditionVariable job_finished_;
+  std::unique_ptr<SweepingState> state_;
   ArrayBufferList young_;
   ArrayBufferList old_;
-  Sweeper::LocalSweeper local_sweeper_;
 };
 
 }  // namespace internal

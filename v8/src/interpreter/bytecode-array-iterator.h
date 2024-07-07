@@ -46,7 +46,7 @@ class V8_EXPORT_PRIVATE JumpTableTargetOffsets final {
     void UpdateAndAdvanceToValid();
 
     const BytecodeArrayIterator* iterator_;
-    Smi current_;
+    Tagged<Smi> current_;
     int index_;
     int table_offset_;
     int table_end_;
@@ -130,6 +130,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayIterator {
   Register GetParameter(int parameter_index) const;
   uint32_t GetRegisterCountOperand(int operand_index) const;
   Register GetRegisterOperand(int operand_index) const;
+  Register GetStarTargetRegister() const;
   std::pair<Register, Register> GetRegisterPairOperand(int operand_index) const;
   RegisterList GetRegisterListOperand(int operand_index) const;
   int GetRegisterOperandRange(int operand_index) const;
@@ -139,7 +140,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayIterator {
   template <typename IsolateT>
   Handle<Object> GetConstantAtIndex(int offset, IsolateT* isolate) const;
   bool IsConstantAtIndexSmi(int offset) const;
-  Smi GetConstantAtIndexAsSmi(int offset) const;
+  Tagged<Smi> GetConstantAtIndexAsSmi(int offset) const;
   template <typename IsolateT>
   Handle<Object> GetConstantForIndexOperand(int operand_index,
                                             IsolateT* isolate) const;
@@ -163,8 +164,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayIterator {
 
   std::ostream& PrintTo(std::ostream& os) const;
 
-  static void UpdatePointersCallback(LocalIsolate*, GCType, GCCallbackFlags,
-                                     void* iterator) {
+  static void UpdatePointersCallback(void* iterator) {
     reinterpret_cast<BytecodeArrayIterator*>(iterator)->UpdatePointers();
   }
 

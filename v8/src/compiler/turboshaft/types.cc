@@ -110,7 +110,7 @@ void Type::PrintTo(std::ostream& stream) const {
 void Type::Print() const {
   StdoutStream os;
   PrintTo(os);
-  os << std::endl;
+  os << '\n';
 }
 
 // static
@@ -691,7 +691,7 @@ Type TupleType::LeastUpperBound(const TupleType& lhs, const TupleType& rhs,
                                 Zone* zone) {
   if (lhs.size() != rhs.size()) return Type::Any();
   Payload p;
-  p.array = zone->NewArray<Type>(lhs.size());
+  p.array = zone->AllocateArray<Type>(lhs.size());
   for (int i = 0; i < lhs.size(); ++i) {
     p.array[i] = Type::LeastUpperBound(lhs.element(i), rhs.element(i), zone);
   }

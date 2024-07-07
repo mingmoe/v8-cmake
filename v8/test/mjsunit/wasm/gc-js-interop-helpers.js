@@ -5,8 +5,7 @@
 // Helpers to test interoperability of Wasm objects in JavaScript.
 
 // The following flags are required:
-// Flags: --turbofan --no-always-turbofan --experimental-wasm-gc
-// Flags: --allow-natives-syntax
+// Flags: --turbofan --no-always-turbofan --allow-natives-syntax
 
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
@@ -19,14 +18,14 @@ function CreateWasmObjects() {
       .addBody([
         kExprI32Const, 42,                       // --
         kGCPrefix, kExprStructNew, struct_type,  // --
-        kGCPrefix, kExprExternExternalize        // --
+        kGCPrefix, kExprExternConvertAny        // --
       ]);
   builder.addFunction('MakeArray', makeSig([], [kWasmExternRef]))
       .exportFunc()
       .addBody([
         kExprI32Const, 2,                             // length
         kGCPrefix, kExprArrayNewDefault, array_type,  // --
-        kGCPrefix, kExprExternExternalize             // --
+        kGCPrefix, kExprExternConvertAny             // --
       ]);
 
   let instance = builder.instantiate();
@@ -37,7 +36,7 @@ function CreateWasmObjects() {
 }
 
 function testThrowsRepeated(fn, ErrorType, ignoreDeopts = false) {
-  const maxRuns = 2;
+  const maxRuns = 3;
   for (let run = 0; run < maxRuns; ++run) {
     %PrepareFunctionForOptimization(fn);
     for (let i = 0; i < 5; i++) assertThrows(fn, ErrorType);
@@ -49,7 +48,7 @@ function testThrowsRepeated(fn, ErrorType, ignoreDeopts = false) {
 }
 
 function repeated(fn, ignoreDeopts = false) {
-  const maxRuns = 2;
+  const maxRuns = 3;
   for (let run = 0; run < maxRuns; ++run) {
     %PrepareFunctionForOptimization(fn);
     for (let i = 0; i < 5; i++) fn();
@@ -59,3 +58,9 @@ function repeated(fn, ignoreDeopts = false) {
   }
   assertOptimized(fn);
 }
+
+// Prevent optimization, so that the test functions can not be inlined which
+// can cause issues in combination with `assertOptimized` and deopts in test
+// code.
+%NeverOptimizeFunction(testThrowsRepeated);
+%NeverOptimizeFunction(repeated);

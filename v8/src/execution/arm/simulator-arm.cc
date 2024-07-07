@@ -159,8 +159,8 @@ namespace {
 // (simulator) builds.
 void SetInstructionBitsInCodeSpace(Instruction* instr, Instr value,
                                    Heap* heap) {
-  CodePageMemoryModificationScope scope(
-      MemoryChunk::FromAddress(reinterpret_cast<Address>(instr)));
+  CodePageMemoryModificationScopeForDebugging scope(
+      MemoryChunkMetadata::FromAddress(reinterpret_cast<Address>(instr)));
   instr->SetInstructionBits(value);
 }
 }  // namespace
@@ -309,10 +309,10 @@ bool ArmDebugger::ExecDebugCommand(ArrayUniquePtr<char> line_ptr) {
       int32_t value;
       StdoutStream os;
       if (GetValue(arg1, &value)) {
-        Object obj(value);
+        Tagged<Object> obj(value);
         os << arg1 << ": \n";
 #ifdef DEBUG
-        obj.Print(os);
+        Print(obj, os);
         os << "\n";
 #else
         os << Brief(obj) << "\n";
@@ -355,16 +355,16 @@ bool ArmDebugger::ExecDebugCommand(ArrayUniquePtr<char> line_ptr) {
     while (cur < end) {
       PrintF("  0x%08" V8PRIxPTR ":  0x%08x %10d",
              reinterpret_cast<intptr_t>(cur), *cur, *cur);
-      Object obj(*cur);
+      Tagged<Object> obj(*cur);
       Heap* current_heap = sim_->isolate_->heap();
       if (!skip_obj_print) {
-        if (obj.IsSmi() ||
+        if (IsSmi(obj) ||
             IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
           PrintF(" (");
-          if (obj.IsSmi()) {
+          if (IsSmi(obj)) {
             PrintF("smi %d", Smi::ToInt(obj));
           } else {
-            obj.ShortPrint();
+            ShortPrint(obj);
           }
           PrintF(")");
         }
@@ -522,9 +522,9 @@ bool ArmDebugger::ExecDebugCommand(ArrayUniquePtr<char> line_ptr) {
       PrintF("Wrong usage. Use help command for more information.\n");
     }
   } else if ((strcmp(cmd, "t") == 0) || strcmp(cmd, "trace") == 0) {
-    v8_flags.trace_sim = !v8_flags.trace_sim;
+    sim_->ToggleInstructionTracing();
     PrintF("Trace of executed instructions is %s\n",
-           v8_flags.trace_sim ? "on" : "off");
+           sim_->InstructionTracingEnabled() ? "on" : "off");
   } else if ((strcmp(cmd, "h") == 0) || (strcmp(cmd, "help") == 0)) {
     PrintF("cont\n");
     PrintF("  continue execution (alias 'c')\n");
@@ -592,6 +592,12 @@ bool ArmDebugger::ExecDebugCommand(ArrayUniquePtr<char> line_ptr) {
 
 #undef STR
 #undef XSTR
+}
+
+bool Simulator::InstructionTracingEnabled() { return instruction_tracing_; }
+
+void Simulator::ToggleInstructionTracing() {
+  instruction_tracing_ = !instruction_tracing_;
 }
 
 bool Simulator::ICacheMatch(void* one, void* two) {
@@ -683,8 +689,7 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
 Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   // Set up simulator support first. Some of this information is needed to
   // setup the architecture state.
-  size_t stack_size = 1 * 1024 * 1024;  // allocate 1MB for stack
-  stack_ = reinterpret_cast<char*>(base::Malloc(stack_size));
+  stack_ = reinterpret_cast<uint8_t*>(base::Malloc(kAllocatedStackSize));
   pc_modified_ = false;
   icount_ = 0;
   break_pc_ = nullptr;
@@ -721,9 +726,8 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   inexact_vfp_flag_ = false;
 
   // The sp is initialized to point to the bottom (high address) of the
-  // allocated stack area. To be safe in potential stack underflows we leave
-  // some buffer below.
-  registers_[sp] = reinterpret_cast<int32_t>(stack_) + stack_size - 64;
+  // usable stack area.
+  registers_[sp] = reinterpret_cast<int32_t>(stack_) + kUsableStackSize;
   // The lr and pc are initialized to a known bad value that will cause an
   // access violation if the simulator ever tries to execute it.
   registers_[pc] = bad_lr;
@@ -1145,9 +1149,16 @@ uintptr_t Simulator::StackLimit(uintptr_t c_limit) const {
     return reinterpret_cast<uintptr_t>(get_sp());
   }
 
-  // Otherwise the limit is the JS stack. Leave a safety margin of 4 KiB
-  // to prevent overrunning the stack when pushing values.
-  return reinterpret_cast<uintptr_t>(stack_) + 4 * KB;
+  // Otherwise the limit is the JS stack. Leave a safety margin to prevent
+  // overrunning the stack when pushing values.
+  return reinterpret_cast<uintptr_t>(stack_) + kAdditionalStackMargin;
+}
+
+base::Vector<uint8_t> Simulator::GetCurrentStackView() const {
+  // We do not add an additional safety margin as above in
+  // Simulator::StackLimit, as this is currently only used in wasm::StackMemory,
+  // which adds its own margin.
+  return base::VectorOf(stack_, kUsableStackSize);
 }
 
 // Unsupported instructions use Format to print an error and stop execution.
@@ -1692,7 +1703,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         int64_t iresult = 0;  // integer return value
         double dresult = 0;   // double return value
         GetFpArgs(&dval0, &dval1, &ival);
-        if (v8_flags.trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           SimulatorRuntimeCall generic_target =
               reinterpret_cast<SimulatorRuntimeCall>(external);
           switch (redirection->type()) {
@@ -1766,7 +1777,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
           default:
             UNREACHABLE();
         }
-        if (v8_flags.trace_sim) {
+        if (InstructionTracingEnabled()) {
           switch (redirection->type()) {
             case ExternalReference::BUILTIN_COMPARE_CALL:
               PrintF("Returned %08x\n", static_cast<int32_t>(iresult));
@@ -1782,7 +1793,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         }
       } else if (redirection->type() ==
                  ExternalReference::BUILTIN_FP_POINTER_CALL) {
-        if (v8_flags.trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           PrintF("Call to host function at %p args %08x",
                  reinterpret_cast<void*>(external), arg0);
           if (!stack_aligned) {
@@ -1798,12 +1809,12 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         TrashCallerSaveRegisters();
 #endif
         SetFpResult(dresult);
-        if (v8_flags.trace_sim) {
+        if (InstructionTracingEnabled()) {
           PrintF("Returned %f\n", dresult);
         }
       } else if (redirection->type() == ExternalReference::DIRECT_API_CALL) {
         // void f(v8::FunctionCallbackInfo&)
-        if (v8_flags.trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           PrintF("Call to host function at %p args %08x",
                  reinterpret_cast<void*>(external), arg0);
           if (!stack_aligned) {
@@ -1820,7 +1831,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
 #endif
       } else if (redirection->type() == ExternalReference::DIRECT_GETTER_CALL) {
         // void f(v8::Local<String> property, v8::PropertyCallbackInfo& info)
-        if (v8_flags.trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           PrintF("Call to host function at %p args %08x %08x",
                  reinterpret_cast<void*>(external), arg0, arg1);
           if (!stack_aligned) {
@@ -1850,7 +1861,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
         DCHECK(redirection->type() == ExternalReference::BUILTIN_CALL ||
                redirection->type() == ExternalReference::BUILTIN_CALL_PAIR ||
                redirection->type() == ExternalReference::FAST_C_CALL);
-        if (v8_flags.trace_sim || !stack_aligned) {
+        if (InstructionTracingEnabled() || !stack_aligned) {
           PrintF(
               "Call to host function at %p "
               "args %08x, %08x, %08x, %08x, %08x, %08x, %08x, %08x, %08x, "
@@ -1874,7 +1885,7 @@ void Simulator::SoftwareInterrupt(Instruction* instr) {
 #endif
         int32_t lo_res = static_cast<int32_t>(result);
         int32_t hi_res = static_cast<int32_t>(result >> 32);
-        if (v8_flags.trace_sim) {
+        if (InstructionTracingEnabled()) {
           PrintF("Returned %08x\n", lo_res);
         }
         set_register(r0, lo_res);
@@ -6113,7 +6124,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     CheckICache(i_cache(), instr);
   }
   pc_modified_ = false;
-  if (v8_flags.trace_sim) {
+  if (InstructionTracingEnabled()) {
     disasm::NameConverter converter;
     disasm::Disassembler dasm(converter);
     // use a reasonably large buffer

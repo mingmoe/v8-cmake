@@ -21,27 +21,19 @@ class Hole : public HeapObject {
  public:
   inline void set_raw_numeric_value(uint64_t bits);
 
-  inline uint8_t kind() const;
-  inline void set_kind(uint8_t kind);
-
   DECL_CAST(Hole)
 
   DECL_VERIFIER(Hole)
 
   static inline void Initialize(Isolate* isolate, Handle<Hole> hole,
-                                Handle<HeapNumber> numeric_value, uint8_t kind);
+                                Handle<HeapNumber> numeric_value);
 
   // Currently, we allow optimized code to treat holes as HeapNumbers to avoid
   // conditional branching. This works by making Hole::kRawNumericValueOffset
-  // the same as HeapNumber::kValueOffset and storing NaN at that offset in
+  // the same as offsetof(HeapNumber, value_) and storing NaN at that offset in
   // Holes. This way, a hole will look like a NaN HeapNumber to optimized code.
   DECL_FIELD_OFFSET_TQ(RawNumericValue, HeapObject::kHeaderSize, "float64")
-  DECL_FIELD_OFFSET_TQ(Kind, kRawNumericValueOffset + kDoubleSize, "Smi")
-  static constexpr int kSize = kKindOffset + kTaggedSize;
-  static_assert(HeapNumber::kValueOffset == Hole::kRawNumericValueOffset);
-
-  static const uint8_t kDefaultHole = 0;
-  // TODO(chromium:1445008): introduce special-purpose holes.
+  static constexpr int kSize = kRawNumericValueOffset + kDoubleSize;
 
   using BodyDescriptor = FixedBodyDescriptor<kSize, kSize, kSize>;
 

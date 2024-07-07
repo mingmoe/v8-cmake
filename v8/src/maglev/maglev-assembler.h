@@ -9,7 +9,7 @@
 #include "src/codegen/macro-assembler.h"
 #include "src/common/globals.h"
 #include "src/flags/flags.h"
-#include "src/interpreter/bytecode-flags.h"
+#include "src/interpreter/bytecode-flags-and-tokens.h"
 #include "src/maglev/maglev-code-gen-state.h"
 #include "src/maglev/maglev-ir.h"
 
@@ -19,6 +19,32 @@ namespace maglev {
 
 class Graph;
 class MaglevAssembler;
+
+inline ExternalReference SpaceAllocationTopAddress(Isolate* isolate,
+                                                   AllocationType alloc_type) {
+  if (alloc_type == AllocationType::kYoung) {
+    return ExternalReference::new_space_allocation_top_address(isolate);
+  }
+  DCHECK_EQ(alloc_type, AllocationType::kOld);
+  return ExternalReference::old_space_allocation_top_address(isolate);
+}
+
+inline ExternalReference SpaceAllocationLimitAddress(
+    Isolate* isolate, AllocationType alloc_type) {
+  if (alloc_type == AllocationType::kYoung) {
+    return ExternalReference::new_space_allocation_limit_address(isolate);
+  }
+  DCHECK_EQ(alloc_type, AllocationType::kOld);
+  return ExternalReference::old_space_allocation_limit_address(isolate);
+}
+
+inline Builtin AllocateBuiltin(AllocationType alloc_type) {
+  if (alloc_type == AllocationType::kYoung) {
+    return Builtin::kAllocateInYoungGeneration;
+  }
+  DCHECK_EQ(alloc_type, AllocationType::kOld);
+  return Builtin::kAllocateInOldGeneration;
+}
 
 // Label allowed to be passed to deferred code.
 class ZoneLabelRef {
@@ -52,7 +78,8 @@ class MapCompare {
   inline explicit MapCompare(MaglevAssembler* masm, Register object,
                              size_t map_count);
 
-  inline void Generate(Handle<Map> map);
+  inline void Generate(Handle<Map> map, Condition cond, Label* if_true,
+                       Label::Distance distance = Label::kFar);
   inline Register GetObject() const { return object_; }
   inline Register GetMap();
 
@@ -66,7 +93,7 @@ class MapCompare {
   Register map_ = Register::no_reg();
 };
 
-class MaglevAssembler : public MacroAssembler {
+class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
  public:
   class ScratchRegisterScope;
 
@@ -90,6 +117,8 @@ class MaglevAssembler : public MacroAssembler {
   inline MemOperand ToMemOperand(const compiler::InstructionOperand& operand);
   inline MemOperand ToMemOperand(const ValueLocation& location);
 
+  inline Register GetFramePointer();
+
   inline int GetFramePointerOffsetForStackSlot(
       const compiler::AllocatedOperand& operand) {
     int index = operand.index();
@@ -104,6 +133,11 @@ class MaglevAssembler : public MacroAssembler {
 
   void Allocate(RegisterSnapshot register_snapshot, Register result,
                 int size_in_bytes,
+                AllocationType alloc_type = AllocationType::kYoung,
+                AllocationAlignment alignment = kTaggedAligned);
+
+  void Allocate(RegisterSnapshot register_snapshot, Register result,
+                Register size_in_bytes,
                 AllocationType alloc_type = AllocationType::kYoung,
                 AllocationAlignment alignment = kTaggedAligned);
 
@@ -142,6 +176,8 @@ class MaglevAssembler : public MacroAssembler {
   inline void LoadTaggedSignedField(Register result, MemOperand operand);
   inline void LoadTaggedSignedField(Register result, Register object,
                                     int offset);
+  inline void LoadAndUntagTaggedSignedField(Register result, Register object,
+                                            int offset);
   inline void LoadTaggedFieldByIndex(Register result, Register object,
                                      Register index, int scale, int offset);
   inline void LoadBoundedSizeFromObject(Register result, Register object,
@@ -155,6 +191,8 @@ class MaglevAssembler : public MacroAssembler {
                                                         Register index);
   inline void LoadFixedDoubleArrayElement(DoubleRegister result, Register array,
                                           Register index);
+  inline void StoreFixedDoubleArrayElement(Register array, Register index,
+                                           DoubleRegister value);
 
   inline void LoadSignedField(Register result, MemOperand operand,
                               int element_size);
@@ -172,8 +210,27 @@ class MaglevAssembler : public MacroAssembler {
     DecodeField<BitField>(result);
   }
 
+  enum StoreMode { kField, kElement };
   enum ValueIsCompressed { kValueIsDecompressed, kValueIsCompressed };
   enum ValueCanBeSmi { kValueCannotBeSmi, kValueCanBeSmi };
+
+  inline void SetSlotAddressForTaggedField(Register slot_reg, Register object,
+                                           int offset);
+  inline void SetSlotAddressForFixedArrayElement(Register slot_reg,
+                                                 Register object,
+                                                 Register index);
+
+  template <StoreMode store_mode>
+  using OffsetTypeFor = std::conditional_t<store_mode == kField, int, Register>;
+
+  template <StoreMode store_mode>
+  void CheckAndEmitDeferredWriteBarrier(Register object,
+                                        OffsetTypeFor<store_mode> offset,
+                                        Register value,
+                                        RegisterSnapshot register_snapshot,
+                                        ValueIsCompressed value_is_compressed,
+                                        ValueCanBeSmi value_can_be_smi);
+
   // Preserves all registers that are in the register snapshot, but is otherwise
   // allowed to clobber both input registers if they are not in the snapshot.
   //
@@ -192,13 +249,19 @@ class MaglevAssembler : public MacroAssembler {
                                              Register value);
   inline void StoreTaggedSignedField(Register object, int offset,
                                      Register value);
-  inline void StoreTaggedSignedField(Register object, int offset, Smi value);
+  inline void StoreTaggedSignedField(Register object, int offset,
+                                     Tagged<Smi> value);
 
   inline void StoreInt32Field(Register object, int offset, int32_t value);
   inline void StoreField(MemOperand operand, Register value, int element_size);
   inline void ReverseByteOrder(Register value, int element_size);
 
-  void BuildTypedArrayDataPointer(Register data_pointer, Register object);
+  inline void BuildTypedArrayDataPointer(Register data_pointer,
+                                         Register object);
+  inline MemOperand TypedArrayElementOperand(Register data_pointer,
+                                             Register index, int element_size);
+  inline MemOperand DataViewElementOperand(Register data_pointer,
+                                           Register index);
 
   // Warning: Input registers {string} and {index} will be scratched.
   // {result} is allowed to alias with one the other 3 input registers.
@@ -249,10 +312,22 @@ class MaglevAssembler : public MacroAssembler {
   inline void CheckInt32IsSmi(Register obj, Label* fail,
                               Register scratch = Register::no_reg());
 
+  // Add/Subtract a constant (not smi tagged) to a smi. Jump to {fail} if the
+  // result doesn't fit.
+  inline void SmiAddConstant(Register dst, Register src, int value, Label* fail,
+                             Label::Distance distance = Label::kFar);
+  inline void SmiAddConstant(Register reg, int value, Label* fail,
+                             Label::Distance distance = Label::kFar);
+  inline void SmiSubConstant(Register dst, Register src, int value, Label* fail,
+                             Label::Distance distance = Label::kFar);
+  inline void SmiSubConstant(Register reg, int value, Label* fail,
+                             Label::Distance distance = Label::kFar);
+
   inline void MoveHeapNumber(Register dst, double value);
 
   void TruncateDoubleToInt32(Register dst, DoubleRegister src);
   void TryTruncateDoubleToInt32(Register dst, DoubleRegister src, Label* fail);
+  void TryTruncateDoubleToUint32(Register dst, DoubleRegister src, Label* fail);
 
   void TryChangeFloat64ToIndex(Register result, DoubleRegister value,
                                Label* success, Label* fail);
@@ -274,6 +349,8 @@ class MaglevAssembler : public MacroAssembler {
                              Label::Distance distance = Label::kFar);
   template <typename NodeT>
   inline Label* GetDeoptLabel(NodeT* node, DeoptimizeReason reason);
+  inline bool IsDeoptLabel(Label* label);
+  inline void EmitEagerDeoptStress(Label* label);
   template <typename NodeT>
   inline void EmitEagerDeopt(NodeT* node, DeoptimizeReason reason);
   template <typename NodeT>
@@ -281,10 +358,26 @@ class MaglevAssembler : public MacroAssembler {
                                NodeT* node);
   template <typename NodeT>
   inline void EmitEagerDeoptIfNotEqual(DeoptimizeReason reason, NodeT* node);
+  template <typename NodeT>
+  inline void EmitEagerDeoptIfSmi(NodeT* node, Register object,
+                                  DeoptimizeReason reason);
+  template <typename NodeT>
+  inline void EmitEagerDeoptIfNotSmi(NodeT* node, Register object,
+                                     DeoptimizeReason reason);
 
   void MaterialiseValueNode(Register dst, ValueNode* value);
 
   inline void IncrementInt32(Register reg);
+  inline void DecrementInt32(Register reg);
+  inline void AddInt32(Register reg, int amount);
+  inline void ShiftLeft(Register reg, int amount);
+  inline void IncrementAddress(Register reg, int32_t delta);
+  inline void LoadAddress(Register dst, MemOperand location);
+
+  inline void Call(Label* target);
+
+  inline void EmitEnterExitFrame(int extra_slots, StackFrame::Type frame_type,
+                                 Register c_function, Register scratch);
 
   inline MemOperand StackSlotOperand(StackSlot slot);
   inline void Move(StackSlot dst, Register src);
@@ -292,20 +385,39 @@ class MaglevAssembler : public MacroAssembler {
   inline void Move(Register dst, StackSlot src);
   inline void Move(DoubleRegister dst, StackSlot src);
   inline void Move(MemOperand dst, Register src);
-  inline void Move(MemOperand dst, DoubleRegister src);
   inline void Move(Register dst, MemOperand src);
-  inline void Move(DoubleRegister dst, MemOperand src);
   inline void Move(DoubleRegister dst, DoubleRegister src);
-  inline void Move(Register dst, Smi src);
+  inline void Move(Register dst, Tagged<Smi> src);
   inline void Move(Register dst, ExternalReference src);
   inline void Move(Register dst, Register src);
-  inline void Move(Register dst, TaggedIndex i);
+  inline void Move(Register dst, Tagged<TaggedIndex> i);
   inline void Move(Register dst, int32_t i);
+  inline void Move(Register dst, uint32_t i);
   inline void Move(DoubleRegister dst, double n);
   inline void Move(DoubleRegister dst, Float64 n);
   inline void Move(Register dst, Handle<HeapObject> obj);
 
+  inline void MoveTagged(Register dst, Handle<HeapObject> obj);
+
+  inline void LoadMapForCompare(Register dst, Register obj);
+
   inline void LoadByte(Register dst, MemOperand src);
+
+  inline void LoadFloat32(DoubleRegister dst, MemOperand src);
+  inline void StoreFloat32(MemOperand dst, DoubleRegister src);
+  inline void LoadFloat64(DoubleRegister dst, MemOperand src);
+  inline void StoreFloat64(MemOperand dst, DoubleRegister src);
+
+  inline void LoadUnalignedFloat64(DoubleRegister dst, Register base,
+                                   Register index);
+  inline void LoadUnalignedFloat64AndReverseByteOrder(DoubleRegister dst,
+                                                      Register base,
+                                                      Register index);
+  inline void StoreUnalignedFloat64(Register base, Register index,
+                                    DoubleRegister src);
+  inline void ReverseByteOrderAndStoreUnalignedFloat64(Register base,
+                                                       Register index,
+                                                       DoubleRegister src);
 
   inline void SignExtend32To64Bits(Register dst, Register src);
   inline void NegateInt32(Register val);
@@ -317,38 +429,74 @@ class MaglevAssembler : public MacroAssembler {
   inline void DeoptIfBufferDetached(Register array, Register scratch,
                                     NodeT* node);
 
-  inline void IsObjectType(Register heap_object, InstanceType type);
-  inline void CompareObjectType(Register heap_object, InstanceType type);
+  inline Condition IsCallableAndNotUndetectable(Register map, Register scratch);
+  inline Condition IsNotCallableNorUndetactable(Register map, Register scratch);
+
+  inline void LoadInstanceType(Register instance_type, Register heap_object);
+  inline void CompareObjectTypeAndAssert(Register heap_object,
+                                         InstanceType type, Condition cond,
+                                         AbortReason reason);
+  inline void CompareObjectTypeAndJumpIf(
+      Register heap_object, InstanceType type, Condition cond, Label* target,
+      Label::Distance distance = Label::kFar);
+  inline void CompareObjectTypeAndBranch(
+      Register heap_object, InstanceType type, Condition condition,
+      Label* if_true, Label::Distance true_distance, bool fallthrough_when_true,
+      Label* if_false, Label::Distance false_distance,
+      bool fallthrough_when_false);
   inline void JumpIfJSAnyIsNotPrimitive(Register heap_object, Label* target,
                                         Label::Distance distance = Label::kFar);
-  inline void CompareObjectType(Register heap_object, InstanceType type,
-                                Register scratch);
+
+  inline void JumpIfStringMap(Register map, Label* target,
+                              Label::Distance distance = Label::kFar,
+                              bool jump_if_true = true);
+  inline void JumpIfString(Register heap_object, Label* target,
+                           Label::Distance distance = Label::kFar);
+  inline void JumpIfNotString(Register heap_object, Label* target,
+                              Label::Distance distance = Label::kFar);
+  inline void CheckJSAnyIsStringAndBranch(Register heap_object, Label* if_true,
+                                          Label::Distance true_distance,
+                                          bool fallthrough_when_true,
+                                          Label* if_false,
+                                          Label::Distance false_distance,
+                                          bool fallthrough_when_false);
+
   inline void CompareObjectTypeRange(Register heap_object,
+                                     InstanceType lower_limit,
+                                     InstanceType higher_limit);
+  inline void CompareObjectTypeRange(Register heap_object, Register scratch,
                                      InstanceType lower_limit,
                                      InstanceType higher_limit);
 
   inline void CompareMapWithRoot(Register object, RootIndex index,
                                  Register scratch);
 
+  inline void CompareInstanceType(Register map, InstanceType instance_type);
   inline void CompareInstanceTypeRange(Register map, InstanceType lower_limit,
                                        InstanceType higher_limit);
   inline void CompareInstanceTypeRange(Register map, Register instance_type_out,
                                        InstanceType lower_limit,
                                        InstanceType higher_limit);
 
-  inline void CompareTagged(Register reg, Smi smi);
-  inline void CompareTagged(Register reg, Handle<HeapObject> obj);
-  inline void CompareTagged(Register src1, Register src2);
-
-  inline void CompareTaggedAndJumpIf(Register reg, Smi smi, Condition cond,
-                                     Label* target,
+  inline void CompareTaggedAndJumpIf(Register reg, Tagged<Smi> smi,
+                                     Condition cond, Label* target,
+                                     Label::Distance distance = Label::kFar);
+  inline void CompareTaggedAndJumpIf(Register reg, Handle<HeapObject> obj,
+                                     Condition cond, Label* target,
+                                     Label::Distance distance = Label::kFar);
+  inline void CompareTaggedAndJumpIf(Register src1, Register src2,
+                                     Condition cond, Label* target,
                                      Label::Distance distance = Label::kFar);
 
-  inline void CompareInt32(Register reg, int32_t imm);
-  inline void CompareInt32(Register src1, Register src2);
-
-  inline void CompareFloat64(DoubleRegister src1, DoubleRegister src2);
-
+  inline void CompareFloat64AndJumpIf(DoubleRegister src1, DoubleRegister src2,
+                                      Condition cond, Label* target,
+                                      Label* nan_failed,
+                                      Label::Distance distance = Label::kFar);
+  inline void CompareFloat64AndBranch(DoubleRegister src1, DoubleRegister src2,
+                                      Condition cond, BasicBlock* if_true,
+                                      BasicBlock* if_false,
+                                      BasicBlock* next_block,
+                                      BasicBlock* nan_failed);
   inline void PrepareCallCFunction(int num_reg_arguments,
                                    int num_double_registers = 0);
 
@@ -360,6 +508,7 @@ class MaglevAssembler : public MacroAssembler {
   inline void CallRuntime(Runtime::FunctionId fid, int num_args);
 
   inline void Jump(Label* target, Label::Distance distance = Label::kFar);
+  inline void JumpToDeopt(Label* target);
   inline void JumpIf(Condition cond, Label* target,
                      Label::Distance distance = Label::kFar);
 
@@ -380,18 +529,51 @@ class MaglevAssembler : public MacroAssembler {
   inline void JumpIfNotHoleNan(DoubleRegister value, Register scratch,
                                Label* target,
                                Label::Distance distance = Label::kFar);
+  inline void JumpIfNan(DoubleRegister value, Label* target,
+                        Label::Distance distance = Label::kFar);
+  inline void JumpIfNotNan(DoubleRegister value, Label* target,
+                           Label::Distance distance = Label::kFar);
   inline void JumpIfNotHoleNan(MemOperand operand, Label* target,
                                Label::Distance distance = Label::kFar);
 
   inline void CompareInt32AndJumpIf(Register r1, Register r2, Condition cond,
                                     Label* target,
                                     Label::Distance distance = Label::kFar);
+  inline void CompareIntPtrAndJumpIf(Register r1, Register r2, Condition cond,
+                                     Label* target,
+                                     Label::Distance distance = Label::kFar);
   inline void CompareInt32AndJumpIf(Register r1, int32_t value, Condition cond,
                                     Label* target,
                                     Label::Distance distance = Label::kFar);
-  inline void CompareSmiAndJumpIf(Register r1, Smi value, Condition cond,
-                                  Label* target,
+  inline void CompareInt32AndBranch(Register r1, int32_t value, Condition cond,
+                                    BasicBlock* if_true, BasicBlock* if_false,
+                                    BasicBlock* next_block);
+  inline void CompareInt32AndBranch(Register r1, Register r2, Condition cond,
+                                    BasicBlock* if_true, BasicBlock* if_false,
+                                    BasicBlock* next_block);
+  inline void CompareInt32AndBranch(Register r1, int32_t value, Condition cond,
+                                    Label* if_true,
+                                    Label::Distance true_distance,
+                                    bool fallthrough_when_true, Label* if_false,
+                                    Label::Distance false_distance,
+                                    bool fallthrough_when_false);
+  inline void CompareInt32AndBranch(Register r1, Register r2, Condition cond,
+                                    Label* if_true,
+                                    Label::Distance true_distance,
+                                    bool fallthrough_when_true, Label* if_false,
+                                    Label::Distance false_distance,
+                                    bool fallthrough_when_false);
+  inline void CompareInt32AndAssert(Register r1, Register r2, Condition cond,
+                                    AbortReason reason);
+  inline void CompareInt32AndAssert(Register r1, int32_t value, Condition cond,
+                                    AbortReason reason);
+  inline void CompareSmiAndJumpIf(Register r1, Tagged<Smi> value,
+                                  Condition cond, Label* target,
                                   Label::Distance distance = Label::kFar);
+  inline void CompareByteAndJumpIf(MemOperand left, int8_t right,
+                                   Condition cond, Register scratch,
+                                   Label* target,
+                                   Label::Distance distance = Label::kFar);
 
   inline void CompareDoubleAndJumpIfZeroOrNaN(
       DoubleRegister reg, Label* target,
@@ -417,15 +599,16 @@ class MaglevAssembler : public MacroAssembler {
   inline void Uint32ToDouble(DoubleRegister result, Register src);
   inline void SmiToDouble(DoubleRegister result, Register smi);
 
-  void StringLength(Register result, Register string);
+  inline void StringLength(Register result, Register string);
 
   // The registers WriteBarrierDescriptor::ObjectRegister and
   // WriteBarrierDescriptor::SlotAddressRegister can be clobbered.
   void StoreFixedArrayElementWithWriteBarrier(
       Register array, Register index, Register value,
       RegisterSnapshot register_snapshot);
-  void StoreFixedArrayElementNoWriteBarrier(Register array, Register index,
-                                            Register value);
+  inline void StoreFixedArrayElementNoWriteBarrier(Register array,
+                                                   Register index,
+                                                   Register value);
 
   // TODO(victorgomes): Import baseline Pop(T...) methods.
   inline void Pop(Register dst);
@@ -436,15 +619,19 @@ class MaglevAssembler : public MacroAssembler {
   template <typename... T>
   inline void PushReverse(T... vals);
 
+  void OSRPrologue(Graph* graph);
   void Prologue(Graph* graph);
 
   inline void FinishCode();
 
   inline void AssertStackSizeCorrect();
+  inline Condition FunctionEntryStackCheck(int stack_check_offset);
 
   inline void SetMapAsRoot(Register object, RootIndex map);
 
   inline void LoadHeapNumberValue(DoubleRegister result, Register heap_number);
+  inline void LoadHeapNumberOrOddballValue(DoubleRegister result,
+                                           Register object);
 
   void LoadDataField(const PolymorphicAccessInfo& access_info, Register result,
                      Register object, Register scratch);
@@ -453,6 +640,9 @@ class MaglevAssembler : public MacroAssembler {
                                   Label* eager_deopt_entry,
                                   size_t lazy_deopt_count,
                                   Label* lazy_deopt_entry);
+
+  void GenerateCheckConstTrackingLetCellFooter(Register context, Register data,
+                                               int index, Label* done);
 
   compiler::NativeContextRef native_context() const {
     return code_gen_state()->broker()->target_native_context();
@@ -481,11 +671,6 @@ class MaglevAssembler : public MacroAssembler {
   void set_allow_deferred_call(bool value) { allow_deferred_call_ = value; }
 #endif  // DEBUG
 
-#ifdef V8_TARGET_ARCH_ARM
-  bool failed() const { return failed_; }
-  void set_failed(bool value) { failed_ = true; }
-#endif
-
  private:
   inline constexpr int GetFramePointerOffsetForStackSlot(int index) {
     return StandardFrameConstants::kExpressionsOffset -
@@ -501,10 +686,6 @@ class MaglevAssembler : public MacroAssembler {
   bool allow_call_ = false;
   bool allow_deferred_call_ = false;
 #endif  // DEBUG
-
-#ifdef V8_TARGET_ARCH_ARM
-  bool failed_ = false;
-#endif
 };
 
 class SaveRegisterStateForCall {
@@ -534,11 +715,12 @@ class SaveRegisterStateForCall {
 #ifdef V8_TARGET_ARCH_ARM64
     pushed_reg_index = RoundUp<2>(pushed_reg_index);
 #endif
-    int num_pushed_double_reg = snapshot_.live_double_registers.Count();
+    int num_double_slots = snapshot_.live_double_registers.Count() *
+                           (kDoubleSize / kSystemPointerSize);
 #ifdef V8_TARGET_ARCH_ARM64
-    num_pushed_double_reg = RoundUp<2>(num_pushed_double_reg);
+    num_double_slots = RoundUp<2>(num_double_slots);
 #endif
-    safepoint.SetNumPushedRegisters(pushed_reg_index + num_pushed_double_reg);
+    safepoint.SetNumExtraSpillSlots(pushed_reg_index + num_double_slots);
     return safepoint;
   }
 
@@ -562,6 +744,15 @@ ZoneLabelRef::ZoneLabelRef(MaglevAssembler* masm)
 // Deopt
 // ---
 
+inline bool MaglevAssembler::IsDeoptLabel(Label* label) {
+  for (auto deopt : code_gen_state_->eager_deopts()) {
+    if (deopt->deopt_entry_label() == label) {
+      return true;
+    }
+  }
+  return false;
+}
+
 template <typename NodeT>
 inline Label* MaglevAssembler::GetDeoptLabel(NodeT* node,
                                              DeoptimizeReason reason) {
@@ -580,8 +771,8 @@ inline Label* MaglevAssembler::GetDeoptLabel(NodeT* node,
 template <typename NodeT>
 inline void MaglevAssembler::EmitEagerDeopt(NodeT* node,
                                             DeoptimizeReason reason) {
-  RecordComment("-- Jump to eager deopt");
-  Jump(GetDeoptLabel(node, reason));
+  RecordComment("-- jump to eager deopt");
+  JumpToDeopt(GetDeoptLabel(node, reason));
 }
 
 template <typename NodeT>
@@ -590,6 +781,20 @@ inline void MaglevAssembler::EmitEagerDeoptIf(Condition cond,
                                               NodeT* node) {
   RecordComment("-- Jump to eager deopt");
   JumpIf(cond, GetDeoptLabel(node, reason));
+}
+
+template <typename NodeT>
+void MaglevAssembler::EmitEagerDeoptIfSmi(NodeT* node, Register object,
+                                          DeoptimizeReason reason) {
+  RecordComment("-- Jump to eager deopt");
+  JumpIfSmi(object, GetDeoptLabel(node, reason));
+}
+
+template <typename NodeT>
+void MaglevAssembler::EmitEagerDeoptIfNotSmi(NodeT* node, Register object,
+                                             DeoptimizeReason reason) {
+  RecordComment("-- Jump to eager deopt");
+  JumpIfNotSmi(object, GetDeoptLabel(node, reason));
 }
 
 inline void MaglevAssembler::DefineLazyDeoptPoint(LazyDeoptInfo* info) {
@@ -669,19 +874,6 @@ struct is_iterator_range<base::iterator_range<T>> : std::true_type {};
 
 // General helpers.
 
-inline bool AnyMapIsHeapNumber(const compiler::ZoneRefSet<Map>& maps) {
-  return std::any_of(maps.begin(), maps.end(), [](compiler::MapRef map) {
-    return map.IsHeapNumberMap();
-  });
-}
-
-inline bool AnyMapIsHeapNumber(
-    const base::Vector<const compiler::MapRef>& maps) {
-  return std::any_of(maps.begin(), maps.end(), [](compiler::MapRef map) {
-    return map.IsHeapNumberMap();
-  });
-}
-
 inline Condition ToCondition(AssertCondition cond) {
   switch (cond) {
 #define CASE(Name)               \
@@ -705,6 +897,24 @@ constexpr Condition ConditionFor(Operation operation) {
       return kGreaterThan;
     case Operation::kGreaterThanOrEqual:
       return kGreaterThanEqual;
+    default:
+      UNREACHABLE();
+  }
+}
+
+constexpr Condition UnsignedConditionFor(Operation operation) {
+  switch (operation) {
+    case Operation::kEqual:
+    case Operation::kStrictEqual:
+      return kEqual;
+    case Operation::kLessThan:
+      return kUnsignedLessThan;
+    case Operation::kLessThanOrEqual:
+      return kUnsignedLessThanEqual;
+    case Operation::kGreaterThan:
+      return kUnsignedGreaterThan;
+    case Operation::kGreaterThanOrEqual:
+      return kUnsignedGreaterThanEqual;
     default:
       UNREACHABLE();
   }

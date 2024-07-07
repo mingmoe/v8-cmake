@@ -24,13 +24,11 @@ size_t hash_value(OutputFrameStateCombine const& sc) {
   return base::hash_value(sc.parameter_);
 }
 
-
 std::ostream& operator<<(std::ostream& os, OutputFrameStateCombine const& sc) {
   if (sc.parameter_ == OutputFrameStateCombine::kInvalidIndex)
     return os << "Ignore";
   return os << "PokeAt(" << sc.parameter_ << ")";
 }
-
 
 bool operator==(FrameStateInfo const& lhs, FrameStateInfo const& rhs) {
   return lhs.type() == rhs.type() && lhs.bailout_id() == rhs.bailout_id() &&
@@ -38,17 +36,14 @@ bool operator==(FrameStateInfo const& lhs, FrameStateInfo const& rhs) {
          lhs.function_info() == rhs.function_info();
 }
 
-
 bool operator!=(FrameStateInfo const& lhs, FrameStateInfo const& rhs) {
   return !(lhs == rhs);
 }
-
 
 size_t hash_value(FrameStateInfo const& info) {
   return base::hash_combine(static_cast<int>(info.type()), info.bailout_id(),
                             info.state_combine());
 }
-
 
 std::ostream& operator<<(std::ostream& os, FrameStateType type) {
   switch (type) {
@@ -58,8 +53,11 @@ std::ostream& operator<<(std::ostream& os, FrameStateType type) {
     case FrameStateType::kInlinedExtraArguments:
       os << "INLINED_EXTRA_ARGUMENTS";
       break;
-    case FrameStateType::kConstructStub:
-      os << "CONSTRUCT_STUB";
+    case FrameStateType::kConstructCreateStub:
+      os << "CONSTRUCT_CREATE_STUB";
+      break;
+    case FrameStateType::kConstructInvokeStub:
+      os << "CONSTRUCT_INVOKE_STUB";
       break;
     case FrameStateType::kBuiltinContinuation:
       os << "BUILTIN_CONTINUATION_FRAME";
@@ -71,6 +69,9 @@ std::ostream& operator<<(std::ostream& os, FrameStateType type) {
     case FrameStateType::kJSToWasmBuiltinContinuation:
       os << "JS_TO_WASM_BUILTIN_CONTINUATION_FRAME";
       break;
+    case FrameStateType::kLiftoffFunction:
+      os << "LIFTOFF_FRAME";
+      break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kJavaScriptBuiltinContinuation:
       os << "JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME";
@@ -81,7 +82,6 @@ std::ostream& operator<<(std::ostream& os, FrameStateType type) {
   }
   return os;
 }
-
 
 std::ostream& operator<<(std::ostream& os, FrameStateInfo const& info) {
   os << info.type() << ", " << info.bailout_id() << ", "
@@ -219,7 +219,7 @@ FrameState CreateJavaScriptBuiltinContinuationFrameState(
   DCHECK_EQ(Builtins::GetStackParameterCount(name),
             stack_parameter_count + DeoptimizerParameterCountFor(mode));
 
-  Node* argc = jsgraph->Constant(Builtins::GetStackParameterCount(name));
+  Node* argc = jsgraph->ConstantNoHole(Builtins::GetStackParameterCount(name));
 
   // Stack parameters first. They must be first because the receiver is expected
   // to be the second value in the translation when creating stack crawls
@@ -257,6 +257,16 @@ FrameState CreateGenericLazyDeoptContinuationFrameState(
       graph, shared, Builtin::kGenericLazyDeoptContinuation, target, context,
       stack_parameters, stack_parameter_count, outer_frame_state,
       ContinuationFrameStateMode::LAZY);
+}
+
+Node* CreateInlinedApiFunctionFrameState(JSGraph* graph,
+                                         SharedFunctionInfoRef shared,
+                                         Node* target, Node* context,
+                                         Node* receiver,
+                                         Node* outer_frame_state) {
+  if (!v8_flags.experimental_stack_trace_frames) return outer_frame_state;
+  return CreateGenericLazyDeoptContinuationFrameState(
+      graph, shared, target, context, receiver, outer_frame_state);
 }
 
 FrameState CloneFrameState(JSGraph* jsgraph, FrameState frame_state,

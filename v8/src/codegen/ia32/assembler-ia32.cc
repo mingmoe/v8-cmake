@@ -285,7 +285,7 @@ Register Operand::reg() const {
 
 bool operator!=(Operand op, XMMRegister r) { return !op.is_reg(r); }
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
   for (auto& request : heap_number_requests_) {
     Handle<HeapObject> object =
@@ -317,7 +317,10 @@ Assembler::Assembler(const AssemblerOptions& options,
   }
 }
 
-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  GetCode(isolate->main_thread_local_isolate(), desc);
+}
+void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
                         SafepointTableBuilder* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
@@ -405,7 +408,7 @@ void Assembler::Nop(int bytes) {
     switch (bytes) {
       case 2:
         EMIT(0x66);
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case 1:
         EMIT(0x90);
         return;
@@ -422,7 +425,7 @@ void Assembler::Nop(int bytes) {
         return;
       case 6:
         EMIT(0x66);
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case 5:
         EMIT(0xF);
         EMIT(0x1F);
@@ -443,15 +446,15 @@ void Assembler::Nop(int bytes) {
       case 11:
         EMIT(0x66);
         bytes--;
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case 10:
         EMIT(0x66);
         bytes--;
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case 9:
         EMIT(0x66);
         bytes--;
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case 8:
         EMIT(0xF);
         EMIT(0x1F);
@@ -1065,6 +1068,22 @@ void Assembler::lea(Register dst, Operand src) {
   EnsureSpace ensure_space(this);
   EMIT(0x8D);
   emit_operand(dst, src);
+}
+
+void Assembler::lea(Register dst, Register src, Label* lbl) {
+  EnsureSpace ensure_space(this);
+  EMIT(0x8D);
+
+  // ModRM byte for dst,[src]+disp32.
+  EMIT(((0x2) << 6) | (dst.code() << 3) | src.code());
+
+  if (lbl->is_bound()) {
+    int offs = lbl->pos() - (pc_offset() + sizeof(int32_t));
+    DCHECK_LE(offs, 0);
+    emit(offs);
+  } else {
+    emit_disp(lbl, Displacement::OTHER);
+  }
 }
 
 void Assembler::mul(Register src) {
@@ -3332,8 +3351,13 @@ void Assembler::GrowBuffer() {
   base::Vector<uint8_t> instructions{buffer_start_,
                                      static_cast<size_t>(pc_offset())};
   base::Vector<const uint8_t> reloc_info{reloc_info_writer.pos(), reloc_size};
-  for (RelocIterator it(instructions, reloc_info, 0, mode_mask); !it.done();
-       it.next()) {
+  WritableJitAllocation jit_allocation =
+      WritableJitAllocation::ForNonExecutableMemory(
+          reinterpret_cast<Address>(instructions.begin()), instructions.size(),
+          ThreadIsolation::JitAllocationType::kInstructionStream);
+  for (WritableRelocIterator it(jit_allocation, instructions, reloc_info, 0,
+                                mode_mask);
+       !it.done(); it.next()) {
     it.rinfo()->apply(pc_delta);
   }
 

@@ -207,7 +207,7 @@ MemOperand::MemOperand(Register ra, Register rb)
 MemOperand::MemOperand(Register ra, Register rb, int64_t offset)
     : ra_(ra), offset_(offset), rb_(rb) {}
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
   for (auto& request : heap_number_requests_) {
     Handle<HeapObject> object =
@@ -242,7 +242,10 @@ Assembler::Assembler(const AssemblerOptions& options,
   relocations_.reserve(128);
 }
 
-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  GetCode(isolate->main_thread_local_isolate(), desc);
+}
+void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
                         SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
@@ -1499,8 +1502,8 @@ void Assembler::bitwise_add32(Register dst, Register src, int32_t value) {
   }
 }
 
-void Assembler::patch_wasm_cpi_return_address(Register dst, int pc_offset,
-                                              int return_address_offset) {
+void Assembler::patch_pc_address(Register dst, int pc_offset,
+                                 int return_address_offset) {
   DCHECK(is_int16(return_address_offset));
   Assembler patching_assembler(
       AssemblerOptions{},

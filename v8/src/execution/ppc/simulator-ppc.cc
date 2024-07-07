@@ -129,8 +129,8 @@ namespace {
 // (simulator) builds.
 void SetInstructionBitsInCodeSpace(Instruction* instr, Instr value,
                                    Heap* heap) {
-  CodePageMemoryModificationScope scope(
-      MemoryChunk::FromAddress(reinterpret_cast<Address>(instr)));
+  CodePageMemoryModificationScopeForDebugging scope(
+      MemoryChunkMetadata::FromAddress(reinterpret_cast<Address>(instr)));
   instr->SetInstructionBits(value);
 }
 }  // namespace
@@ -338,10 +338,10 @@ void PPCDebugger::Debug() {
           intptr_t value;
           StdoutStream os;
           if (GetValue(arg1, &value)) {
-            Object obj(value);
+            Tagged<Object> obj(value);
             os << arg1 << ": \n";
 #ifdef DEBUG
-            obj.Print(os);
+            Print(obj, os);
             os << "\n";
 #else
             os << Brief(obj) << "\n";
@@ -392,16 +392,16 @@ void PPCDebugger::Debug() {
         while (cur < end) {
           PrintF("  0x%08" V8PRIxPTR ":  0x%08" V8PRIxPTR " %10" V8PRIdPTR,
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
-          Object obj(*cur);
+          Tagged<Object> obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
           if (!skip_obj_print) {
-            if (obj.IsSmi() ||
+            if (IsSmi(obj) ||
                 IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
               PrintF(" (");
-              if (obj.IsSmi()) {
+              if (IsSmi(obj)) {
                 PrintF("smi %d", Smi::ToInt(obj));
               } else {
-                obj.ShortPrint();
+                ShortPrint(obj);
               }
               PrintF(")");
             }
@@ -738,13 +738,7 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
 Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
 // Set up simulator support first. Some of this information is needed to
 // setup the architecture state.
-#if V8_TARGET_ARCH_PPC64
-  size_t stack_size = v8_flags.sim_stack_size * KB;
-#else
-  size_t stack_size = MB;  // allocate 1MB for stack
-#endif
-  stack_size += 2 * stack_protection_size_;
-  stack_ = reinterpret_cast<char*>(base::Malloc(stack_size));
+  stack_ = reinterpret_cast<uint8_t*>(base::Malloc(AllocatedStackSize()));
   pc_modified_ = false;
   icount_ = 0;
   break_pc_ = nullptr;
@@ -769,8 +763,7 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   // The sp is initialized to point to the bottom (high address) of the
   // allocated stack area. To be safe in potential stack underflows we leave
   // some buffer below.
-  registers_[sp] =
-      reinterpret_cast<intptr_t>(stack_) + stack_size - stack_protection_size_;
+  registers_[sp] = reinterpret_cast<intptr_t>(stack_) + UsableStackSize();
 
   last_debugger_input_ = nullptr;
 }
@@ -893,7 +886,14 @@ uintptr_t Simulator::StackLimit(uintptr_t c_limit) const {
 
   // Otherwise the limit is the JS stack. Leave a safety margin to prevent
   // overrunning the stack when pushing values.
-  return reinterpret_cast<uintptr_t>(stack_) + stack_protection_size_;
+  return reinterpret_cast<uintptr_t>(stack_) + kStackProtectionSize;
+}
+
+base::Vector<uint8_t> Simulator::GetCurrentStackView() const {
+  // We do not add an additional safety margin as above in
+  // Simulator::StackLimit, as this is currently only used in wasm::StackMemory,
+  // which adds its own margin.
+  return base::VectorOf(stack_, UsableStackSize());
 }
 
 // Unsupported instructions use Format to print an error and stop execution.
@@ -1348,11 +1348,11 @@ void Simulator::SetCR0(intptr_t result, bool setSO) {
   condition_reg_ = (condition_reg_ & ~0xF0000000) | bf;
 }
 
-void Simulator::SetCR6(bool true_for_all, bool false_for_all) {
+void Simulator::SetCR6(bool true_for_all) {
   int32_t clear_cr6_mask = 0xFFFFFF0F;
   if (true_for_all) {
     condition_reg_ = (condition_reg_ & clear_cr6_mask) | 0x80;
-  } else if (false_for_all) {
+  } else {
     condition_reg_ = (condition_reg_ & clear_cr6_mask) | 0x20;
   }
 }
@@ -1423,14 +1423,13 @@ template <typename A, typename T, typename Operation>
 void VectorCompareOp(Simulator* sim, Instruction* instr, bool is_fp,
                      Operation op) {
   DECODE_VX_INSTRUCTION(t, a, b, T)
-  bool true_for_all = true, false_for_all = true;
+  bool true_for_all = true;
   FOR_EACH_LANE(i, A) {
     A a_val = sim->get_simd_register_by_lane<A>(a, i);
     A b_val = sim->get_simd_register_by_lane<A>(b, i);
     T t_val = 0;
     bool is_not_nan = is_fp ? !isnan(a_val) && !isnan(b_val) : true;
     if (is_not_nan && op(a_val, b_val)) {
-      false_for_all = false;
       t_val = -1;  // Set all bits to 1 indicating true.
     } else {
       true_for_all = false;
@@ -1438,7 +1437,7 @@ void VectorCompareOp(Simulator* sim, Instruction* instr, bool is_fp,
     sim->set_simd_register_by_lane<T>(t, i, t_val);
   }
   if (instr->Bit(10)) {  // RC bit set.
-    sim->SetCR6(true_for_all, false_for_all);
+    sim->SetCR6(true_for_all);
   }
 }
 
@@ -1545,7 +1544,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       uint64_t prefix_value = instr->Bits(17, 0);
       // Read suffix (next instruction).
       Instruction* next_instr =
-          base::bit_cast<Instruction*>(get_pc() + kInstrSize);
+          reinterpret_cast<Instruction*>(get_pc() + kInstrSize);
       uint16_t suffix_value = next_instr->Bits(15, 0);
       int64_t im_val = SIGN_EXT_IMM34((prefix_value << 16) | suffix_value);
       switch (next_instr->OpcodeBase()) {
@@ -2244,7 +2243,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
     case STFSUX:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFSX: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2275,7 +2274,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
     case STFDUX:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFDX: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -3466,7 +3465,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
     }
 
     case STFSU:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFS: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -5152,7 +5151,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       unsigned __int128 src_3 =
           base::bit_cast<__int128>(get_simd_register(vrc).int8);
       unsigned __int128 tmp = (src_1 & ~src_3) | (src_2 & src_3);
-      simdr_t* result = base::bit_cast<simdr_t*>(&tmp);
+      simdr_t* result = reinterpret_cast<simdr_t*>(&tmp);
       set_simd_register(vrt, *result);
       break;
     }
@@ -5486,7 +5485,7 @@ void Simulator::CallInternal(Address entry) {
   // Prepare to execute the code at entry
   if (ABI_USES_FUNCTION_DESCRIPTORS) {
     // entry is the function descriptor
-    set_pc(*(base::bit_cast<intptr_t*>(entry)));
+    set_pc(*(reinterpret_cast<intptr_t*>(entry)));
   } else {
     // entry is the instruction address
     set_pc(static_cast<intptr_t>(entry));

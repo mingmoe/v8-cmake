@@ -6,7 +6,7 @@
 
 #include <ostream>
 
-#include "src/codegen/code-factory.h"
+#include "src/builtins/builtins-inl.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/compiler/backend/instruction-selector.h"
@@ -256,7 +256,7 @@ TNode<IntPtrT> CodeAssembler::IntPtrConstant(intptr_t value) {
 
 TNode<TaggedIndex> CodeAssembler::TaggedIndexConstant(intptr_t value) {
   DCHECK(TaggedIndex::IsValid(value));
-  return UncheckedCast<TaggedIndex>(raw_assembler()->IntPtrConstant(value));
+  return UncheckedCast<TaggedIndex>(jsgraph()->TaggedIndexConstant(value));
 }
 
 TNode<Number> CodeAssembler::NumberConstant(double value) {
@@ -268,12 +268,12 @@ TNode<Number> CodeAssembler::NumberConstant(double value) {
     // deferring allocation to code generation
     // (see AllocateAndInstallRequestedHeapNumbers) since that makes it easier
     // to generate constant lookups for embedded builtins.
-    return UncheckedCast<Number>(HeapConstant(
+    return UncheckedCast<Number>(HeapConstantNoHole(
         isolate()->factory()->NewHeapNumberForCodeAssembler(value)));
   }
 }
 
-TNode<Smi> CodeAssembler::SmiConstant(Smi value) {
+TNode<Smi> CodeAssembler::SmiConstant(Tagged<Smi> value) {
   return UncheckedCast<Smi>(BitcastWordToTaggedSigned(
       IntPtrConstant(static_cast<intptr_t>(value.ptr()))));
 }
@@ -282,21 +282,37 @@ TNode<Smi> CodeAssembler::SmiConstant(int value) {
   return SmiConstant(Smi::FromInt(value));
 }
 
-TNode<HeapObject> CodeAssembler::UntypedHeapConstant(
+// This emits an untyped heap constant that is never a hole.
+TNode<HeapObject> CodeAssembler::UntypedHeapConstantNoHole(
     Handle<HeapObject> object) {
-  return UncheckedCast<HeapObject>(jsgraph()->HeapConstant(object));
+  // jsgraph()->HeapConstantNoHole does a CHECK that it is in fact a hole
+  // value.
+  return UncheckedCast<HeapObject>(jsgraph()->HeapConstantNoHole(object));
+}
+
+// This is used to emit untyped heap constants that can be a hole value.
+// Only use this if you really need to and cannot use *NoHole or *Hole.
+TNode<HeapObject> CodeAssembler::UntypedHeapConstantMaybeHole(
+    Handle<HeapObject> object) {
+  return UncheckedCast<HeapObject>(jsgraph()->HeapConstantMaybeHole(object));
+}
+
+// This is used to emit an untyped heap constant that can only be Hole values.
+TNode<HeapObject> CodeAssembler::UntypedHeapConstantHole(
+    Handle<HeapObject> object) {
+  return UncheckedCast<HeapObject>(jsgraph()->HeapConstantHole(object));
 }
 
 TNode<String> CodeAssembler::StringConstant(const char* str) {
   Handle<String> internalized_string =
       factory()->InternalizeString(base::OneByteVector(str));
-  return UncheckedCast<String>(HeapConstant(internalized_string));
+  return UncheckedCast<String>(HeapConstantNoHole(internalized_string));
 }
 
-TNode<Oddball> CodeAssembler::BooleanConstant(bool value) {
-  Handle<Object> object = isolate()->factory()->ToBoolean(value);
-  return UncheckedCast<Oddball>(
-      jsgraph()->HeapConstant(Handle<HeapObject>::cast(object)));
+TNode<Boolean> CodeAssembler::BooleanConstant(bool value) {
+  Handle<Boolean> object = isolate()->factory()->ToBoolean(value);
+  return UncheckedCast<Boolean>(
+      jsgraph()->HeapConstantNoHole(Handle<HeapObject>::cast(object)));
 }
 
 TNode<ExternalReference> CodeAssembler::ExternalConstant(
@@ -347,7 +363,7 @@ bool CodeAssembler::TryToInt64Constant(TNode<IntegralT> node,
   return m.HasResolvedValue();
 }
 
-bool CodeAssembler::TryToSmiConstant(TNode<Smi> tnode, Smi* out_value) {
+bool CodeAssembler::TryToSmiConstant(TNode<Smi> tnode, Tagged<Smi>* out_value) {
   Node* node = tnode;
   if (node->opcode() == IrOpcode::kBitcastWordToTaggedSigned) {
     node = node->InputAt(0);
@@ -355,13 +371,14 @@ bool CodeAssembler::TryToSmiConstant(TNode<Smi> tnode, Smi* out_value) {
   return TryToSmiConstant(ReinterpretCast<IntPtrT>(tnode), out_value);
 }
 
-bool CodeAssembler::TryToSmiConstant(TNode<IntegralT> node, Smi* out_value) {
+bool CodeAssembler::TryToSmiConstant(TNode<IntegralT> node,
+                                     Tagged<Smi>* out_value) {
   IntPtrMatcher m(node);
   if (m.HasResolvedValue()) {
     intptr_t value = m.ResolvedValue();
     // Make sure that the value is actually a smi
     CHECK_EQ(0, value & ((static_cast<intptr_t>(1) << kSmiShiftSize) - 1));
-    *out_value = Smi(static_cast<Address>(value));
+    *out_value = Tagged<Smi>(static_cast<Address>(value));
     return true;
   }
   return false;
@@ -479,6 +496,17 @@ void CodeAssembler::Return(TNode<WordT> value1, TNode<WordT> value2) {
   return raw_assembler()->Return(value1, value2);
 }
 
+void CodeAssembler::Return(TNode<Word32T> value1, TNode<Word32T> value2) {
+  DCHECK_EQ(2, raw_assembler()->call_descriptor()->ReturnCount());
+  DCHECK_EQ(
+      MachineRepresentation::kWord32,
+      raw_assembler()->call_descriptor()->GetReturnType(0).representation());
+  DCHECK_EQ(
+      MachineRepresentation::kWord32,
+      raw_assembler()->call_descriptor()->GetReturnType(1).representation());
+  return raw_assembler()->Return(value1, value2);
+}
+
 void CodeAssembler::Return(TNode<WordT> value1, TNode<Object> value2) {
   DCHECK_EQ(2, raw_assembler()->call_descriptor()->ReturnCount());
   DCHECK_EQ(
@@ -491,6 +519,12 @@ void CodeAssembler::Return(TNode<WordT> value1, TNode<Object> value2) {
 void CodeAssembler::PopAndReturn(Node* pop, Node* value) {
   DCHECK_EQ(1, raw_assembler()->call_descriptor()->ReturnCount());
   return raw_assembler()->PopAndReturn(pop, value);
+}
+
+void CodeAssembler::PopAndReturn(Node* pop, Node* value1, Node* value2,
+                                 Node* value3, Node* value4) {
+  DCHECK_EQ(4, raw_assembler()->call_descriptor()->ReturnCount());
+  return raw_assembler()->PopAndReturn(pop, value1, value2, value3, value4);
 }
 
 void CodeAssembler::ReturnIf(TNode<BoolT> condition, TNode<Object> value) {
@@ -512,7 +546,7 @@ void CodeAssembler::Unreachable() {
   raw_assembler()->Unreachable();
 }
 
-void CodeAssembler::Comment(std::string str) {
+void CodeAssembler::EmitComment(std::string str) {
   if (!v8_flags.code_comments) return;
   raw_assembler()->Comment(str);
 }
@@ -555,6 +589,28 @@ TNode<RawPtrT> CodeAssembler::LoadParentFramePointer() {
   return UncheckedCast<RawPtrT>(raw_assembler()->LoadParentFramePointer());
 }
 
+#if V8_ENABLE_WEBASSEMBLY
+TNode<RawPtrT> CodeAssembler::LoadStackPointer() {
+  return UncheckedCast<RawPtrT>(raw_assembler()->LoadStackPointer());
+}
+
+void CodeAssembler::SetStackPointer(TNode<RawPtrT> ptr,
+                                    wasm::FPRelativeScope fp_scope) {
+  raw_assembler()->SetStackPointer(ptr, fp_scope);
+}
+#endif
+
+TNode<RawPtrT> CodeAssembler::LoadPointerFromRootRegister(
+    TNode<IntPtrT> offset) {
+  return UncheckedCast<RawPtrT>(
+      Load(MachineType::IntPtr(), raw_assembler()->LoadRootRegister(), offset));
+}
+
+TNode<Uint8T> CodeAssembler::LoadUint8FromRootRegister(TNode<IntPtrT> offset) {
+  return UncheckedCast<Uint8T>(
+      Load(MachineType::Uint8(), raw_assembler()->LoadRootRegister(), offset));
+}
+
 TNode<RawPtrT> CodeAssembler::StackSlotPtr(int size, int alignment) {
   return UncheckedCast<RawPtrT>(raw_assembler()->StackSlot(size, alignment));
 }
@@ -565,6 +621,20 @@ TNode<RawPtrT> CodeAssembler::StackSlotPtr(int size, int alignment) {
   }
 CODE_ASSEMBLER_BINARY_OP_LIST(DEFINE_CODE_ASSEMBLER_BINARY_OP)
 #undef DEFINE_CODE_ASSEMBLER_BINARY_OP
+
+TNode<PairT<Word32T, Word32T>> CodeAssembler::Int32PairAdd(
+    TNode<Word32T> lhs_lo_word, TNode<Word32T> lhs_hi_word,
+    TNode<Word32T> rhs_lo_word, TNode<Word32T> rhs_hi_word) {
+  return UncheckedCast<PairT<Word32T, Word32T>>(raw_assembler()->Int32PairAdd(
+      lhs_lo_word, lhs_hi_word, rhs_lo_word, rhs_hi_word));
+}
+
+TNode<PairT<Word32T, Word32T>> CodeAssembler::Int32PairSub(
+    TNode<Word32T> lhs_lo_word, TNode<Word32T> lhs_hi_word,
+    TNode<Word32T> rhs_lo_word, TNode<Word32T> rhs_hi_word) {
+  return UncheckedCast<PairT<Word32T, Word32T>>(raw_assembler()->Int32PairSub(
+      lhs_lo_word, lhs_hi_word, rhs_lo_word, rhs_hi_word));
+}
 
 TNode<WordT> CodeAssembler::WordShl(TNode<WordT> value, int shift) {
   return (shift != 0) ? WordShl(value, IntPtrConstant(shift)) : value;
@@ -655,6 +725,10 @@ TNode<Int32T> CodeAssembler::TruncateFloat32ToInt32(TNode<Float32T> value) {
   return UncheckedCast<Int32T>(raw_assembler()->TruncateFloat32ToInt32(
       value, TruncateKind::kSetOverflowToMin));
 }
+TNode<Int64T> CodeAssembler::TruncateFloat64ToInt64(TNode<Float64T> value) {
+  return UncheckedCast<Int64T>(raw_assembler()->TruncateFloat64ToInt64(
+      value, TruncateKind::kSetOverflowToMin));
+}
 #define DEFINE_CODE_ASSEMBLER_UNARY_OP(name, ResType, ArgType) \
   TNode<ResType> CodeAssembler::name(TNode<ArgType> a) {       \
     return UncheckedCast<ResType>(raw_assembler()->name(a));   \
@@ -706,6 +780,11 @@ Node* CodeAssembler::LoadFromObject(MachineType type, TNode<Object> object,
   return raw_assembler()->LoadFromObject(type, object, offset);
 }
 
+Node* CodeAssembler::LoadProtectedPointerFromObject(TNode<Object> object,
+                                                    TNode<IntPtrT> offset) {
+  return raw_assembler()->LoadProtectedPointerFromObject(object, offset);
+}
+
 #ifdef V8_MAP_PACKING
 Node* CodeAssembler::PackMapWord(Node* value) {
   TNode<IntPtrT> map_word =
@@ -719,7 +798,7 @@ Node* CodeAssembler::PackMapWord(Node* value) {
 TNode<AnyTaggedT> CodeAssembler::LoadRootMapWord(RootIndex root_index) {
 #ifdef V8_MAP_PACKING
   Handle<Object> root = isolate()->root_handle(root_index);
-  Node* map = HeapConstant(Handle<Map>::cast(root));
+  Node* map = HeapConstantNoHole(Handle<Map>::cast(root));
   map = PackMapWord(map);
   return ReinterpretCast<AnyTaggedT>(map);
 #else
@@ -730,10 +809,10 @@ TNode<AnyTaggedT> CodeAssembler::LoadRootMapWord(RootIndex root_index) {
 TNode<Object> CodeAssembler::LoadRoot(RootIndex root_index) {
   if (RootsTable::IsImmortalImmovable(root_index)) {
     Handle<Object> root = isolate()->root_handle(root_index);
-    if (root->IsSmi()) {
+    if (IsSmi(*root)) {
       return SmiConstant(Smi::cast(*root));
     } else {
-      return HeapConstant(Handle<HeapObject>::cast(root));
+      return HeapConstantMaybeHole(Handle<HeapObject>::cast(root));
     }
   }
 
@@ -786,6 +865,21 @@ void CodeAssembler::OptimizedStoreField(MachineRepresentation rep,
                                         Node* value) {
   raw_assembler()->OptimizedStoreField(rep, object, offset, value,
                                        WriteBarrierKind::kFullWriteBarrier);
+}
+
+void CodeAssembler::OptimizedStoreIndirectPointerField(TNode<HeapObject> object,
+                                                       int offset,
+                                                       IndirectPointerTag tag,
+                                                       Node* value) {
+  raw_assembler()->OptimizedStoreIndirectPointerField(
+      object, offset, tag, value,
+      WriteBarrierKind::kIndirectPointerWriteBarrier);
+}
+
+void CodeAssembler::OptimizedStoreIndirectPointerFieldNoWriteBarrier(
+    TNode<HeapObject> object, int offset, IndirectPointerTag tag, Node* value) {
+  raw_assembler()->OptimizedStoreIndirectPointerField(
+      object, offset, tag, value, WriteBarrierKind::kNoWriteBarrier);
 }
 
 void CodeAssembler::OptimizedStoreFieldAssertNoWriteBarrier(
@@ -958,15 +1052,14 @@ Node* CodeAssembler::Projection(int index, Node* value) {
   return raw_assembler()->Projection(index, value);
 }
 
-TNode<HeapObject> CodeAssembler::OptimizedAllocate(
-    TNode<IntPtrT> size, AllocationType allocation,
-    AllowLargeObjects allow_large_objects) {
-  return UncheckedCast<HeapObject>(raw_assembler()->OptimizedAllocate(
-      size, allocation, allow_large_objects));
+TNode<HeapObject> CodeAssembler::OptimizedAllocate(TNode<IntPtrT> size,
+                                                   AllocationType allocation) {
+  return UncheckedCast<HeapObject>(
+      raw_assembler()->OptimizedAllocate(size, allocation));
 }
 
 void CodeAssembler::HandleException(Node* node) {
-  if (state_->exception_handler_labels_.size() == 0) return;
+  if (state_->exception_handler_labels_.empty()) return;
   CodeAssemblerExceptionHandlerLabel* label =
       state_->exception_handler_labels_.back();
 
@@ -1006,15 +1099,30 @@ class NodeArray {
   Node* arr_[kMaxSize];
   Node** ptr_ = arr_;
 };
+
 }  // namespace
 
 Node* CodeAssembler::CallRuntimeImpl(
     Runtime::FunctionId function, TNode<Object> context,
     std::initializer_list<TNode<Object>> args) {
   int result_size = Runtime::FunctionForId(function)->result_size;
-  TNode<Code> centry =
-      HeapConstant(CodeFactory::RuntimeCEntry(isolate(), result_size));
-  constexpr size_t kMaxNumArgs = 6;
+#if V8_ENABLE_WEBASSEMBLY
+  bool switch_to_the_central_stack =
+      state_->kind_ == CodeKind::WASM_FUNCTION ||
+      state_->kind_ == CodeKind::WASM_TO_JS_FUNCTION ||
+      state_->kind_ == CodeKind::JS_TO_WASM_FUNCTION ||
+      state_->builtin_ == Builtin::kJSToWasmWrapper ||
+      state_->builtin_ == Builtin::kJSToWasmHandleReturns ||
+      state_->builtin_ == Builtin::kWasmToJsWrapperCSA ||
+      wasm::BuiltinLookup::IsWasmBuiltinId(state_->builtin_);
+#else
+  bool switch_to_the_central_stack = false;
+#endif
+  Builtin centry =
+      Builtins::RuntimeCEntry(result_size, switch_to_the_central_stack);
+  TNode<Code> centry_code =
+      HeapConstantNoHole(isolate()->builtins()->code_handle(centry));
+  constexpr size_t kMaxNumArgs = 7;
   DCHECK_GE(kMaxNumArgs, args.size());
   int argc = static_cast<int>(args.size());
   auto call_descriptor = Linkage::GetRuntimeCallDescriptor(
@@ -1027,8 +1135,8 @@ Node* CodeAssembler::CallRuntimeImpl(
   TNode<Int32T> arity = Int32Constant(argc);
 
   NodeArray<kMaxNumArgs + 4> inputs;
-  inputs.Add(centry);
-  for (auto arg : args) inputs.Add(arg);
+  inputs.Add(centry_code);
+  for (const auto& arg : args) inputs.Add(arg);
   inputs.Add(ref);
   inputs.Add(arity);
   inputs.Add(context);
@@ -1045,8 +1153,23 @@ void CodeAssembler::TailCallRuntimeImpl(
     Runtime::FunctionId function, TNode<Int32T> arity, TNode<Object> context,
     std::initializer_list<TNode<Object>> args) {
   int result_size = Runtime::FunctionForId(function)->result_size;
-  TNode<Code> centry =
-      HeapConstant(CodeFactory::RuntimeCEntry(isolate(), result_size));
+#if V8_ENABLE_WEBASSEMBLY
+  bool switch_to_the_central_stack =
+      state_->kind_ == CodeKind::WASM_FUNCTION ||
+      state_->kind_ == CodeKind::WASM_TO_JS_FUNCTION ||
+      state_->kind_ == CodeKind::JS_TO_WASM_FUNCTION ||
+      state_->builtin_ == Builtin::kJSToWasmWrapper ||
+      state_->builtin_ == Builtin::kJSToWasmHandleReturns ||
+      state_->builtin_ == Builtin::kWasmToJsWrapperCSA ||
+      wasm::BuiltinLookup::IsWasmBuiltinId(state_->builtin_);
+#else
+  bool switch_to_the_central_stack = false;
+#endif
+  Builtin centry =
+      Builtins::RuntimeCEntry(result_size, switch_to_the_central_stack);
+  TNode<Code> centry_code =
+      HeapConstantNoHole(isolate()->builtins()->code_handle(centry));
+
   constexpr size_t kMaxNumArgs = 6;
   DCHECK_GE(kMaxNumArgs, args.size());
   int argc = static_cast<int>(args.size());
@@ -1058,8 +1181,8 @@ void CodeAssembler::TailCallRuntimeImpl(
       ExternalConstant(ExternalReference::Create(function));
 
   NodeArray<kMaxNumArgs + 4> inputs;
-  inputs.Add(centry);
-  for (auto arg : args) inputs.Add(arg);
+  inputs.Add(centry_code);
+  for (const auto& arg : args) inputs.Add(arg);
   inputs.Add(ref);
   inputs.Add(arity);
   inputs.Add(context);
@@ -1327,7 +1450,8 @@ void CodeAssembler::Branch(TNode<BoolT> condition,
 void CodeAssembler::Switch(Node* index, Label* default_label,
                            const int32_t* case_values, Label** case_labels,
                            size_t case_count) {
-  RawMachineLabel** labels = zone()->NewArray<RawMachineLabel*>(case_count);
+  RawMachineLabel** labels =
+      zone()->AllocateArray<RawMachineLabel*>(case_count);
   for (size_t i = 0; i < case_count; ++i) {
     labels[i] = case_labels[i]->label_;
     case_labels[i]->MergeVariables();
@@ -1352,7 +1476,7 @@ Factory* CodeAssembler::factory() const { return isolate()->factory(); }
 Zone* CodeAssembler::zone() const { return raw_assembler()->zone(); }
 
 bool CodeAssembler::IsExceptionHandlerActive() const {
-  return state_->exception_handler_labels_.size() != 0;
+  return !state_->exception_handler_labels_.empty();
 }
 
 RawMachineAssembler* CodeAssembler::raw_assembler() const {

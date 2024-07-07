@@ -455,7 +455,7 @@ void NeonMemOperand::SetAlignment(int align) {
   }
 }
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
   for (auto& request : heap_number_requests_) {
     Handle<HeapObject> object =
@@ -559,7 +559,10 @@ VfpRegList Assembler::DefaultFPTmpList() {
   }
 }
 
-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  GetCode(isolate->main_thread_local_isolate(), desc);
+}
+void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
                         SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
@@ -1247,7 +1250,7 @@ void Assembler::AddrMode1(Instr instr, Register rd, Register rn,
       // pool only for a MOV instruction which does not set the flags.
       DCHECK(!rn.is_valid());
       Move32BitImmediate(rd, x, cond);
-    } else if ((opcode == ADD) && !set_flags && (rd == rn) &&
+    } else if ((opcode == ADD || opcode == SUB) && !set_flags && (rd == rn) &&
                !temps.CanAcquire()) {
       // Split the operation into a sequence of additions if we cannot use a
       // scratch register. In this case, we cannot re-use rn and the assembler
@@ -1263,10 +1266,20 @@ void Assembler::AddrMode1(Instr instr, Register rd, Register rn,
         // immediate allows us to more efficiently split it:
         int trailing_zeroes = base::bits::CountTrailingZeros(imm) & ~1u;
         uint32_t mask = (0xFF << trailing_zeroes);
-        add(rd, rd, Operand(imm & mask), LeaveCC, cond);
+        if (opcode == ADD) {
+          add(rd, rd, Operand(imm & mask), LeaveCC, cond);
+        } else {
+          DCHECK_EQ(opcode, SUB);
+          sub(rd, rd, Operand(imm & mask), LeaveCC, cond);
+        }
         imm = imm & ~mask;
       } while (!ImmediateFitsAddrMode1Instruction(imm));
-      add(rd, rd, Operand(imm), LeaveCC, cond);
+      if (opcode == ADD) {
+        add(rd, rd, Operand(imm), LeaveCC, cond);
+      } else {
+        DCHECK_EQ(opcode, SUB);
+        sub(rd, rd, Operand(imm), LeaveCC, cond);
+      }
     } else {
       // The immediate operand cannot be encoded as a shifter operand, so load
       // it first to a scratch register and change the original instruction to

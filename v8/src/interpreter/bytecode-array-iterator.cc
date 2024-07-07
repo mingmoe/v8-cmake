@@ -175,6 +175,19 @@ Register BytecodeArrayIterator::GetRegisterOperand(int operand_index) const {
                                                 current_operand_scale());
 }
 
+Register BytecodeArrayIterator::GetStarTargetRegister() const {
+  Bytecode bytecode = current_bytecode();
+  DCHECK(Bytecodes::IsAnyStar(bytecode));
+  if (Bytecodes::IsShortStar(bytecode)) {
+    return Register::FromShortStar(bytecode);
+  } else {
+    DCHECK_EQ(bytecode, Bytecode::kStar);
+    DCHECK_EQ(Bytecodes::NumberOfOperands(bytecode), 1);
+    DCHECK_EQ(Bytecodes::GetOperandTypes(bytecode)[0], OperandType::kRegOut);
+    return GetRegisterOperand(0);
+  }
+}
+
 std::pair<Register, Register> BytecodeArrayIterator::GetRegisterPairOperand(
     int operand_index) const {
   Register first = GetRegisterOperand(operand_index);
@@ -233,15 +246,15 @@ Runtime::FunctionId BytecodeArrayIterator::GetIntrinsicIdOperand(
 template <typename IsolateT>
 Handle<Object> BytecodeArrayIterator::GetConstantAtIndex(
     int index, IsolateT* isolate) const {
-  return handle(bytecode_array()->constant_pool().get(index), isolate);
+  return handle(bytecode_array()->constant_pool()->get(index), isolate);
 }
 
 bool BytecodeArrayIterator::IsConstantAtIndexSmi(int index) const {
-  return bytecode_array()->constant_pool().get(index).IsSmi();
+  return IsSmi(bytecode_array()->constant_pool()->get(index));
 }
 
-Smi BytecodeArrayIterator::GetConstantAtIndexAsSmi(int index) const {
-  return Smi::cast(bytecode_array()->constant_pool().get(index));
+Tagged<Smi> BytecodeArrayIterator::GetConstantAtIndexAsSmi(int index) const {
+  return Smi::cast(bytecode_array()->constant_pool()->get(index));
 }
 
 template <typename IsolateT>
@@ -265,7 +278,7 @@ int BytecodeArrayIterator::GetRelativeJumpTargetOffset() const {
     }
     return relative_offset;
   } else if (interpreter::Bytecodes::IsJumpConstant(bytecode)) {
-    Smi smi = GetConstantAtIndexAsSmi(GetIndexOperand(0));
+    Tagged<Smi> smi = GetConstantAtIndexAsSmi(GetIndexOperand(0));
     return smi.value();
   } else {
     UNREACHABLE();

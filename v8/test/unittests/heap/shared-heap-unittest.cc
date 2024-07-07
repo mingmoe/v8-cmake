@@ -46,6 +46,7 @@ void SetupClientIsolateAndRunCallback(Callback callback) {
   IsolateWrapper isolate_wrapper(kNoCounters);
   v8::Isolate* client_isolate = isolate_wrapper.isolate();
   Isolate* i_client_isolate = reinterpret_cast<Isolate*>(client_isolate);
+  v8::Isolate::Scope isolate_scope(client_isolate);
 
   callback(client_isolate, i_client_isolate);
 }
@@ -83,6 +84,51 @@ TEST_F(SharedHeapTest, ConcurrentAllocationInSharedOldSpace) {
 
         for (int i = 0; i < kThreads; i++) {
           auto thread = std::make_unique<SharedOldSpaceAllocationThread>();
+          CHECK(thread->Start());
+          threads.push_back(std::move(thread));
+        }
+
+        ParkingThread::ParkedJoinAll(parked, threads);
+      });
+}
+
+namespace {
+class SharedTrustedSpaceAllocationThread final : public ParkingThread {
+ public:
+  SharedTrustedSpaceAllocationThread()
+      : ParkingThread(
+            base::Thread::Options("SharedTrustedSpaceAllocationThread")) {}
+
+  void Run() override {
+    constexpr int kNumIterations = 2000;
+
+    SetupClientIsolateAndRunCallback(
+        [](v8::Isolate* client_isolate, Isolate* i_client_isolate) {
+          HandleScope scope(i_client_isolate);
+
+          for (int i = 0; i < kNumIterations; i++) {
+            i_client_isolate->factory()->NewFixedArray(
+                10, AllocationType::kSharedTrusted);
+          }
+
+          InvokeMajorGC(i_client_isolate);
+
+          v8::platform::PumpMessageLoop(i::V8::GetCurrentPlatform(),
+                                        client_isolate);
+        });
+  }
+};
+}  // namespace
+
+TEST_F(SharedHeapTest, ConcurrentAllocationInSharedTrustedSpace) {
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [](const ParkedScope& parked) {
+        std::vector<std::unique_ptr<SharedTrustedSpaceAllocationThread>>
+            threads;
+        const int kThreads = 4;
+
+        for (int i = 0; i < kThreads; i++) {
+          auto thread = std::make_unique<SharedTrustedSpaceAllocationThread>();
           CHECK(thread->Start());
           threads.push_back(std::move(thread));
         }
@@ -140,6 +186,57 @@ TEST_F(SharedHeapTest, ConcurrentAllocationInSharedLargeOldSpace) {
 }
 
 namespace {
+class SharedTrustedLargeObjectSpaceAllocationThread final
+    : public ParkingThread {
+ public:
+  SharedTrustedLargeObjectSpaceAllocationThread()
+      : ParkingThread(base::Thread::Options(
+            "SharedTrustedLargeObjectSpaceAllocationThread")) {}
+
+  void Run() override {
+    SetupClientIsolateAndRunCallback(
+        [](v8::Isolate* client_isolate, Isolate* i_client_isolate) {
+          HandleScope scope(i_client_isolate);
+          constexpr int kNumIterations = 50;
+
+          for (int i = 0; i < kNumIterations; i++) {
+            HandleScope scope(i_client_isolate);
+            Handle<FixedArray> fixed_array =
+                i_client_isolate->factory()->NewFixedArray(
+                    kMaxRegularHeapObjectSize / kTaggedSize,
+                    AllocationType::kSharedTrusted);
+            CHECK(MemoryChunk::FromHeapObject(*fixed_array)->IsLargePage());
+          }
+
+          InvokeMajorGC(i_client_isolate);
+
+          v8::platform::PumpMessageLoop(i::V8::GetCurrentPlatform(),
+                                        client_isolate);
+        });
+  }
+};
+}  // namespace
+
+TEST_F(SharedHeapTest, ConcurrentAllocationInSharedTrustedLargeObjectSpace) {
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [](const ParkedScope& parked) {
+        std::vector<
+            std::unique_ptr<SharedTrustedLargeObjectSpaceAllocationThread>>
+            threads;
+        constexpr int kThreads = 4;
+
+        for (int i = 0; i < kThreads; i++) {
+          auto thread =
+              std::make_unique<SharedTrustedLargeObjectSpaceAllocationThread>();
+          CHECK(thread->Start());
+          threads.push_back(std::move(thread));
+        }
+
+        ParkingThread::ParkedJoinAll(parked, threads);
+      });
+}
+
+namespace {
 class SharedMapSpaceAllocationThread final : public ParkingThread {
  public:
   SharedMapSpaceAllocationThread()
@@ -152,7 +249,7 @@ class SharedMapSpaceAllocationThread final : public ParkingThread {
           HandleScope scope(i_client_isolate);
 
           for (int i = 0; i < kNumIterations; i++) {
-            i_client_isolate->factory()->NewMap(
+            i_client_isolate->factory()->NewContextlessMap(
                 NATIVE_CONTEXT_TYPE, kVariableSizeSentinel,
                 TERMINAL_FAST_ELEMENTS_KIND, 0, AllocationType::kSharedMap);
           }
@@ -220,8 +317,8 @@ void AllocateInSharedHeap(int iterations = 100) {
     }
 
     for (int i = 0; i < kKeptAliveInHeap; i++) {
-      FixedArray array = FixedArray::cast(arrays_in_heap->get(i));
-      CHECK_EQ(array.length(), 100);
+      Tagged<FixedArray> array = FixedArray::cast(arrays_in_heap->get(i));
+      CHECK_EQ(array->length(), 100);
     }
   });
 }
@@ -473,7 +570,7 @@ void AllocateWithHandle(Isolate* isolate, StateWithHandle* state) {
   state->scope.emplace(isolate);
   // Allocate a fixed array, keep a handle and a weak reference.
   state->handle = isolate->factory()->NewFixedArray(size, allocation);
-  auto l = Utils::Convert<FixedArray, v8::FixedArray>(state->handle);
+  Local<v8::FixedArray> l = Utils::FixedArrayToLocal(state->handle);
   state->weak.Reset(reinterpret_cast<v8::Isolate*>(isolate), l);
   state->weak.SetWeak();
 }
@@ -489,8 +586,8 @@ void InvokeGC(AllocationSpace space, Isolate* isolate) {
 
 template <typename TestType, AllocationType allocation, AllocationSpace space>
 void ToEachTheirOwnWithHandle(TestType* test) {
-  using ThreadType = TestType::ThreadType;
-  auto thread = test->thread();
+  using ThreadType = typename TestType::ThreadType;
+  ThreadType* thread = test->thread();
 
   // Install all the callbacks.
   test->with_setup([](TestType* test) {
@@ -552,9 +649,9 @@ template <AllocationType allocation, AllocationSpace space, int size>
 void AllocateWithRawPointer(Isolate* isolate, StateWithRawPointer* state) {
   // Allocate a fixed array, keep a raw pointer and a weak reference.
   HandleScope scope(isolate);
-  auto h = isolate->factory()->NewFixedArray(size, allocation);
-  state->ptr = h->GetHeapObject().ptr();
-  auto l = Utils::Convert<FixedArray, v8::FixedArray>(h);
+  Handle<FixedArray> h = isolate->factory()->NewFixedArray(size, allocation);
+  state->ptr = (*h).ptr();
+  Local<v8::FixedArray> l = Utils::FixedArrayToLocal(h, isolate);
   state->weak.Reset(reinterpret_cast<v8::Isolate*>(isolate), l);
   state->weak.SetWeak();
 }
@@ -566,8 +663,8 @@ using SharedHeapTestStateWithRawPointerUnparked =
 
 template <typename TestType, AllocationType allocation, AllocationSpace space>
 void ToEachTheirOwnWithRawPointer(TestType* test) {
-  using ThreadType = TestType::ThreadType;
-  auto thread = test->thread();
+  using ThreadType = typename TestType::ThreadType;
+  ThreadType* thread = test->thread();
 
   // Install all the callbacks.
   test->with_setup([](TestType* test) {

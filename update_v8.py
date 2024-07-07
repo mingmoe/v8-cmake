@@ -7,19 +7,38 @@ import os
 import re
 import subprocess
 import sys
+import shutil
+from typing import *
+
+class colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 DATABASE = 'update_v8.json'
+LOCKFILE_NAME = f'{DATABASE}.lock'
+
+CURRENT_WORKSPACE = abspath(dirname(__file__))
+CURRENT_TEMPDIR = abspath(join(CURRENT_WORKSPACE,"./temp"))
+DEFAULT_GIT = shutil.which("git") if shutil.which("git") is not None else "git"
+DEFAULT_TAR = shutil.which("tar") if shutil.which("tar") is not None else "tar"
 
 options = None
-dry_run = False
 
-try:
-  unicode
-except NameError:
-  unicode = str  # Fix-up for python 3.
+os.makedirs(CURRENT_WORKSPACE, exist_ok=True)
+os.makedirs(CURRENT_TEMPDIR, exist_ok=True)
 
-PY3 = (unicode == str)
-
+# ensure we are in python3
+if sys.version_info[0] < 3:
+  print("python2 is not supported!")
+  print("please use python3 instead")
+  sys.exit(1)
 
 def git(*args, **kwargs):
   cmd = [options.git] + list(args)
@@ -32,23 +51,22 @@ def git(*args, **kwargs):
 
   if kwargs.get('check_output'):
     del kwargs['check_output']
-    if PY3: kwargs['encoding'] = 'utf-8'
-    return subprocess.check_output(cmd, **kwargs).strip()
+    kwargs['encoding'] = 'utf-8'
+    output = subprocess.check_output(cmd, **kwargs).strip()
+    print(f"{colors.OKGREEN}\n{output}{colors.ENDC}\n")
+    return output
 
-  subprocess.check_call(cmd, **kwargs)
+  output = subprocess.check_output(cmd, **kwargs).strip()
+  print(f"{colors.OKGREEN}\n{output}{colors.ENDC}\n")
 
-
-def isv8(dep):
+def isv8(dep) -> bool:
   return '' == dep['path']
 
-
-def repodir(dep):
+def repodir(dep) -> str:
   return abspath(join(options.tmpdir, 'v8', dep['path'].replace('/', '_')))
 
-
-def repodir_exists(dep):
+def repodir_exists(dep) -> bool:
   return exists(join(repodir(dep), 'config'))
-
 
 def update_one(dep):
   cwd = abspath('.')
@@ -60,13 +78,13 @@ def update_one(dep):
   clonedir = repodir(dep)
 
   if not repodir_exists(dep):
-    git('clone', '--bare', url, clonedir, cwd=options.tmpdir, dry_run=dry_run)
+    git('clone', '--bare', url, clonedir, cwd=options.tmpdir, dry_run=options.dry_run)
 
   what = commit
   if isv8(dep):
     what = '+refs/{}:refs/{}'.format(branch, branch)
 
-  git('fetch', url, what, cwd=clonedir, dry_run=dry_run)
+  git('fetch', url, what, cwd=clonedir, dry_run=options.dry_run)
 
 
 def update_all():
@@ -78,10 +96,10 @@ def update_all():
 
   for dep in deps:
     assert isinstance(dep, dict)
-    assert isinstance(dep.get('branch'), unicode)
-    assert isinstance(dep.get('commit'), unicode)
-    assert isinstance(dep.get('path'), unicode)
-    assert isinstance(dep.get('url'), unicode)
+    assert isinstance(dep.get('branch'), str)
+    assert isinstance(dep.get('commit'), str)
+    assert isinstance(dep.get('path'), str)
+    assert isinstance(dep.get('url'), str)
 
   v8 = deps[0] # must be first
   assert isv8(v8)
@@ -125,32 +143,39 @@ def update_all():
     if changed:
       update_one(dep)
 
-  arg = '-n' if dry_run else '-q'
-  git('rm', arg, '-r', 'v8')
+  arg = '--dry-run' if options.dry_run else '-q'
+  git('rm', arg, '-r','-f','--ignore-unmatch', './v8')
 
   for dep in deps:
-    cmd = '(cd {} && {} archive --format=tar --prefix=v8/{}/ {}) | {} x'.format(
-        repodir(dep), options.git, dep['path'], dep['commit'], options.tar)
-    if dry_run:
-      print(cmd)
-    else:
-      subprocess.check_call([cmd], shell=True)
+    cmd = [options.git,"archive","--format=tar",f"--prefix=v8/{dep['path']}/",dep['commit'],"-o",f"{CURRENT_TEMPDIR}/v8-archive.tar"]
+    print(cmd)
+    if not options.dry_run:
+      subprocess.check_call(cmd, shell=False,cwd=repodir(dep))
 
+    cmd = [options.tar,"xf",f"{CURRENT_TEMPDIR}/v8-archive.tar"]
+    print(cmd)
+    if not options.dry_run:
+      subprocess.check_call(cmd, shell=False)
+
+  # apply patches
   for filename in sorted(os.listdir('patches')):
     if filename.endswith('.patch'):
-      git('apply', '--reject', join('patches', filename), dry_run=dry_run)
+      git('apply', '--reject', join('patches', filename), dry_run=options.dry_run)
 
+  # remove compiled file
   for path, _, files in os.walk('v8'):
     for filename in files:
       if filename.endswith('.pyc'):
         os.remove(join(path, filename))
 
-  git('add', '-f', 'v8', dry_run=dry_run)
+  # update v8 in this rope
+  git('add', '-f', 'v8', dry_run=options.dry_run)
   git('log', '-1', '--oneline', v8['commit'], cwd=repodir(v8))
 
+  # update database
   newdeps = json.dumps(deps, indent=2)
   newdeps = re.sub(r'\s+$', '\n', newdeps)
-  if dry_run:
+  if options.dry_run:
     print(newdeps)
   else:
     with open(DATABASE, 'w') as fp:
@@ -161,25 +186,15 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Sync with upstream V8')
   parser.add_argument('--dry-run', default=False, action='store_true')
   parser.add_argument('--force', default=False, action='store_true')
-  parser.add_argument('--git', default='git')
-  parser.add_argument('--tar', default='tar')
-  parser.add_argument('--tmpdir', default=os.environ.get('TMPDIR', '/tmp'))
-  parser.add_argument('--workspace', default=abspath(dirname(__file__)))
+  parser.add_argument('--git', default=DEFAULT_GIT)
+  parser.add_argument('--tar', default=DEFAULT_TAR)
   options = parser.parse_args()
-  dry_run = options.dry_run
+
+  options.force = False
+  options.workspace = CURRENT_WORKSPACE
+  options.tmpdir = CURRENT_TEMPDIR
 
   os.chdir(options.workspace)
 
-  lockfile_name = '{}.lock'.format(DATABASE)
-  try:
-    lockfile = open(lockfile_name, 'x') # python 3
-  except ValueError:
-    lockfile = open(lockfile_name, 'wx') # python 2
-
-  try:
+  with open(LOCKFILE_NAME, 'r') as lockfile:
     update_all()
-  finally:
-    try:
-      os.unlink(lockfile_name)
-    except:
-      pass

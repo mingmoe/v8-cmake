@@ -29,16 +29,21 @@ class WasmGraphAssembler : public GraphAssembler {
       : GraphAssembler(mcgraph, zone, BranchSemantics::kMachine),
         simplified_(zone) {}
 
+  // While CallBuiltin() translates to a direct call to the address of the
+  // builtin, CallBuiltinThroughJumptable instead jumps to a slot in a jump
+  // table that then calls the builtin. As the jump table is "close" to the
+  // generated code, this is encoded as a near call resulting in the instruction
+  // being shorter than a direct call to the builtin.
   template <typename... Args>
-  Node* CallRuntimeStub(wasm::WasmCode::RuntimeStubId stub_id,
-                        Operator::Properties properties, Args... args) {
+  Node* CallBuiltinThroughJumptable(Builtin builtin,
+                                    Operator::Properties properties,
+                                    Args... args) {
     auto* call_descriptor = GetBuiltinCallDescriptor(
-        RuntimeStubIdToBuiltinName(stub_id), temp_zone(),
-        StubCallMode::kCallWasmRuntimeStub, false, properties);
+        builtin, temp_zone(), StubCallMode::kCallWasmRuntimeStub, false,
+        properties);
     // A direct call to a wasm runtime stub defined in this module.
     // Just encode the stub index. This will be patched at relocation.
-    Node* call_target = mcgraph()->RelocatableIntPtrConstant(
-        stub_id, RelocInfo::WASM_STUB_CALL);
+    Node* call_target = mcgraph()->RelocatableWasmBuiltinCallTarget(builtin);
     return Call(call_descriptor, call_target, args...);
   }
 
@@ -109,14 +114,26 @@ class WasmGraphAssembler : public GraphAssembler {
 
   Node* Allocate(int size);
 
-  Node* Allocate(Node* size,
-                 AllowLargeObjects allow_large = AllowLargeObjects::kTrue);
+  Node* Allocate(Node* size);
 
   Node* LoadFromObject(MachineType type, Node* base, Node* offset);
 
   Node* LoadFromObject(MachineType type, Node* base, int offset) {
     return LoadFromObject(type, base, IntPtrConstant(offset));
   }
+
+  Node* LoadProtectedPointerFromObject(Node* object, Node* offset);
+  Node* LoadProtectedPointerFromObject(Node* object, int offset) {
+    return LoadProtectedPointerFromObject(object, IntPtrConstant(offset));
+  }
+
+  Node* LoadImmutableProtectedPointerFromObject(Node* object, Node* offset);
+  Node* LoadImmutableProtectedPointerFromObject(Node* object, int offset) {
+    return LoadImmutableProtectedPointerFromObject(object,
+                                                   IntPtrConstant(offset));
+  }
+
+  Node* BuildDecompressProtectedPointer(Node* tagged);
 
   Node* LoadImmutableFromObject(MachineType type, Node* base, Node* offset);
 
@@ -147,9 +164,26 @@ class WasmGraphAssembler : public GraphAssembler {
                                        value);
   }
 
+  Node* BuildDecodeSandboxedExternalPointer(Node* handle,
+                                            ExternalPointerTag tag,
+                                            Node* isolate_root);
   Node* BuildLoadExternalPointerFromObject(Node* object, int offset,
                                            ExternalPointerTag tag,
                                            Node* isolate_root);
+
+  Node* BuildLoadExternalPointerFromObject(Node* object, int offset,
+                                           Node* index, ExternalPointerTag tag,
+                                           Node* isolate_root);
+
+  Node* LoadImmutableTrustedPointerFromObject(Node* object, int offset,
+                                              IndirectPointerTag tag);
+  Node* LoadTrustedPointerFromObject(Node* object, int offset,
+                                     IndirectPointerTag tag);
+  // Returns the load node (where the source position for the trap needs to be
+  // set by the caller) and the result.
+  std::pair<Node*, Node*> LoadTrustedPointerFromObjectTrapOnNull(
+      Node* object, int offset, IndirectPointerTag tag);
+  Node* BuildDecodeTrustedPointer(Node* handle, IndirectPointerTag tag);
 
   Node* IsSmi(Node* object);
 
@@ -188,8 +222,15 @@ class WasmGraphAssembler : public GraphAssembler {
     return LoadFixedArrayElement(array, index, MachineType::AnyTagged());
   }
 
+  Node* LoadProtectedFixedArrayElement(Node* array, int index);
+  Node* LoadProtectedFixedArrayElement(Node* array, Node* index_intptr);
+
   Node* LoadByteArrayElement(Node* byte_array, Node* index_intptr,
                              MachineType type);
+
+  Node* LoadExternalPointerArrayElement(Node* array, Node* index_intptr,
+                                        ExternalPointerTag tag,
+                                        Node* isolate_root);
 
   Node* StoreFixedArrayElement(Node* array, int index, Node* value,
                                ObjectAccess access);
@@ -247,9 +288,9 @@ class WasmGraphAssembler : public GraphAssembler {
 
   Node* AssertNotNull(Node* object, wasm::ValueType type, TrapId trap_id);
 
-  Node* WasmExternInternalize(Node* object);
+  Node* WasmAnyConvertExtern(Node* object);
 
-  Node* WasmExternExternalize(Node* object);
+  Node* WasmExternConvertAny(Node* object);
 
   Node* StructGet(Node* object, const wasm::StructType* type, int field_index,
                   bool is_signed, CheckForNull null_check);
@@ -296,6 +337,8 @@ class WasmGraphAssembler : public GraphAssembler {
   Node* LoadRootRegister() {
     return AddNode(graph()->NewNode(mcgraph()->machine()->LoadRootRegister()));
   }
+
+  Node* LoadTrustedDataFromInstanceObject(Node* instance_object);
 
   SimplifiedOperatorBuilder* simplified() override { return &simplified_; }
 

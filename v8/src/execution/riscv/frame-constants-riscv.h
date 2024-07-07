@@ -9,7 +9,6 @@
 #include "src/base/macros.h"
 #include "src/execution/frame-constants.h"
 #include "src/wasm/baseline/liftoff-assembler-defs.h"
-#include "src/wasm/wasm-linkage.h"
 
 namespace v8 {
 namespace internal {
@@ -19,15 +18,22 @@ class EntryFrameConstants : public AllStatic {
   // This is the offset to where JSEntry pushes the current value of
   // Isolate::c_entry_fp onto the stack.
   static constexpr int kNextExitFrameFPOffset = -3 * kSystemPointerSize;
+  // The offsets for storing the FP and PC of fast API calls.
+  static constexpr int kNextFastCallFrameFPOffset =
+      kNextExitFrameFPOffset - kSystemPointerSize;
+  static constexpr int kNextFastCallFramePCOffset =
+      kNextFastCallFrameFPOffset - kSystemPointerSize;
 };
 
 class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
  public:
   // Number of gp parameters, without the instance.
-  static constexpr int kNumberOfSavedGpParamRegs =
-      arraysize(wasm::kGpParamRegisters) - 1;
-  static constexpr int kNumberOfSavedFpParamRegs =
-      arraysize(wasm::kFpParamRegisters);
+  // Note that {kNumberOfSavedGpParamRegs} = arraysize(wasm::kGpParamRegisters)
+  // - 1, {kNumberOfSavedFpParamRegs} = arraysize(wasm::kFpParamRegisters). Here
+  // we use immediate values instead to avoid circular references (introduced by
+  // linkage_location.h, issue: v8:14035) and resultant compilation errors.
+  static constexpr int kNumberOfSavedGpParamRegs = 6;
+  static constexpr int kNumberOfSavedFpParamRegs = 8;
   static constexpr int kNumberOfSavedAllParamRegs =
       kNumberOfSavedGpParamRegs + kNumberOfSavedFpParamRegs;
   static constexpr int kInstanceSpillOffset =
@@ -41,6 +47,12 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
   static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
   static constexpr int kNativeModuleOffset = 0;
+};
+
+class WasmLiftoffFrameConstants : public TypedFrameConstants {
+ public:
+  static constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
+  static constexpr int kInstanceDataOffset = 2 * kSystemPointerSize;
 };
 
 // Frame constructed by the {WasmDebugBreak} builtin.

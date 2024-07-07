@@ -28,9 +28,7 @@
 #include "src/utils/ostreams.h"
 
 #if V8_ENABLE_WEBASSEMBLY
-#include "src/wasm/function-body-decoder.h"
-#include "src/wasm/names-provider.h"
-#include "src/wasm/string-builder.h"
+#include "src/wasm/wasm-disassembler.h"
 #endif
 
 namespace v8 {
@@ -91,12 +89,13 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
 
   int start = 0;
   int end = 0;
-  if (!script.is_null() && !script->IsUndefined(isolate) && !shared.is_null()) {
-    Object source_name = script->name();
+  if (!script.is_null() && !IsUndefined(*script, isolate) &&
+      !shared.is_null()) {
+    Tagged<Object> source_name = script->name();
     os << ", \"sourceName\": \"";
-    if (source_name.IsString()) {
+    if (IsString(source_name)) {
       std::ostringstream escaped_name;
-      escaped_name << String::cast(source_name).ToCString().get();
+      escaped_name << String::cast(source_name)->ToCString().get();
       os << JSONEscaped(escaped_name);
     }
     os << "\"";
@@ -104,7 +103,7 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
       start = shared->StartPosition();
       end = shared->EndPosition();
       os << ", \"sourceText\": \"";
-      if (!script->source().IsUndefined()) {
+      if (!IsUndefined(script->source())) {
         DisallowGarbageCollection no_gc;
         int len = shared->EndPosition() - start;
         SubStringRange source(String::cast(script->source()), no_gc, start,
@@ -114,33 +113,18 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
         }
 #if V8_ENABLE_WEBASSEMBLY
       } else if (shared->HasWasmExportedFunctionData()) {
-        WasmExportedFunctionData function_data =
+        Tagged<WasmExportedFunctionData> function_data =
             shared->wasm_exported_function_data();
-        Handle<WasmInstanceObject> instance(function_data.instance(), isolate);
-        const wasm::WasmModule* module = instance->module();
+        // TODO(jkummerow): Introduce a pointer from WasmExportedFunctionData
+        // to WasmTrustedInstanceData (without going via WasmInstanceObject).
+        Handle<WasmInstanceObject> instance(function_data->instance(), isolate);
         wasm::NativeModule* native_module =
-            instance->module_object().native_module();
-
-        // Add a comment with the wasm debug name as the sourceName above will
-        // be something like "wasm://wasm/5b5cdc9e:js-to-wasm:n:i".
+            instance->trusted_data(isolate)->native_module();
+        const wasm::WasmModule* module = native_module->module();
         std::ostringstream str;
-        wasm::StringBuilder sb;
-        sb << "// debug name: ";
-        native_module->GetNamesProvider()->PrintFunctionName(
-            sb, function_data.function_index(), wasm::NamesProvider::kDevTools);
-        sb << '\n';
-        str.write(sb.start(), sb.length());
-
-        wasm::WireBytesRef wire_bytes_ref =
-            module->functions[function_data.function_index()].code;
-        base::Vector<const uint8_t> bytes(native_module->wire_bytes().SubVector(
-            wire_bytes_ref.offset(), wire_bytes_ref.end_offset()));
-        wasm::FunctionBody func_body{function_data.sig(),
-                                     wire_bytes_ref.offset(), bytes.begin(),
-                                     bytes.end()};
-        AccountingAllocator allocator;
-        wasm::PrintRawWasmCode(&allocator, func_body, module,
-                               wasm::kPrintLocals, str);
+        wasm::DisassembleFunction(module, function_data->function_index(),
+                                  native_module->wire_bytes(),
+                                  native_module->GetNamesProvider(), str);
         os << JSONEscaped(str);
 #endif  // V8_ENABLE_WEBASSEMBLY
       }
@@ -217,7 +201,7 @@ void JsonPrintAllSourceWithPositions(std::ostream& os,
   os << "\"sources\" : {";
   Handle<Script> script =
       (info->shared_info().is_null() ||
-       info->shared_info()->script() == Object())
+       info->shared_info()->script() == Tagged<Object>())
           ? Handle<Script>()
           : handle(Script::cast(info->shared_info()->script()), isolate);
   JsonPrintFunctionSource(os, -1,
@@ -247,6 +231,61 @@ void JsonPrintAllSourceWithPositions(std::ostream& os,
   os << "}";
 }
 
+#if V8_ENABLE_WEBASSEMBLY
+void JsonPrintAllSourceWithPositionsWasm(
+    std::ostream& os, const wasm::WasmModule* module,
+    const wasm::WireBytesStorage* wire_bytes,
+    base::Vector<WasmInliningPosition> positions) {
+  // Filter out duplicate sources. (A single wasm function might be inlined more
+  // than once.)
+  std::vector<int /*function id*/> sources;
+  std::unordered_map<int /*function id*/, size_t /*source index*/> source_map;
+  for (WasmInliningPosition pos : positions) {
+    auto [_, inserted] =
+        source_map.emplace(pos.inlinee_func_index, sources.size());
+    if (inserted) {
+      // The function wasn't inlined yet. Add a new entry to the sources.
+      // The hashmap stores the index to the entry in the source map.
+      sources.push_back(pos.inlinee_func_index);
+    }
+    // Don't do anything if it was already inserted.
+  }
+
+  // Print inlining sources.
+  os << "\"sources\": {";
+  for (size_t i = 0; i < sources.size(); ++i) {
+    if (i != 0) os << ", ";
+    int function_id = sources[i];
+    const wasm::WasmFunction& fct = module->functions[function_id];
+    os << '"' << i << "\": {\"sourceId\": " << i << ", \"functionName\": \""
+       << fct.func_index << "\", \"sourceName\": \"\", \"sourceText\": \"";
+    base::Vector<const uint8_t> module_bytes{nullptr, 0};
+    base::Optional<wasm::ModuleWireBytes> maybe_wire_bytes =
+        wire_bytes->GetModuleBytes();
+    if (maybe_wire_bytes) module_bytes = maybe_wire_bytes->module_bytes();
+    std::ostringstream wasm_str;
+    wasm::DisassembleFunction(module, function_id,
+                              wire_bytes->GetCode(fct.code), module_bytes,
+                              fct.code.offset(), wasm_str);
+    os << JSONEscaped(wasm_str) << "\"}";
+  }
+  os << "},\n";
+  // Print inlining mappings.
+  // This maps the inlining position to the deduplicated source in the sources
+  // object generated above.
+  os << "\"inlinings\": {";
+  for (size_t i = 0; i < positions.size(); ++i) {
+    if (i != 0) os << ", ";
+    DCHECK(source_map.contains(positions[i].inlinee_func_index));
+    size_t source_id = source_map.find(positions[i].inlinee_func_index)->second;
+    SourcePosition inlining_pos = positions[i].caller_pos;
+    os << '"' << i << "\": {\"inliningId\": " << i
+       << ", \"sourceId\": " << source_id
+       << ", \"inliningPosition\": " << AsJSON(inlining_pos) << "}";
+  }
+}
+#endif
+
 std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
                                                  const char* optional_base_dir,
                                                  const char* phase,
@@ -273,12 +312,13 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
   base::EmbeddedVector<char, 256> source_file(0);
   bool source_available = false;
   if (v8_flags.trace_file_names && info->has_shared_info() &&
-      info->shared_info()->script().IsScript()) {
-    Object source_name = Script::cast(info->shared_info()->script()).name();
-    if (source_name.IsString()) {
-      String str = String::cast(source_name);
-      if (str.length() > 0) {
-        SNPrintF(source_file, "%s", str.ToCString().get());
+      IsScript(info->shared_info()->script())) {
+    Tagged<Object> source_name =
+        Script::cast(info->shared_info()->script())->name();
+    if (IsString(source_name)) {
+      Tagged<String> str = String::cast(source_name);
+      if (str->length() > 0) {
+        SNPrintF(source_file, "%s", str->ToCString().get());
         std::replace(source_file.begin(),
                      source_file.begin() + source_file.length(), '/', '_');
         source_available = true;
@@ -472,8 +512,7 @@ class GraphC1Visualizer {
   void PrintSchedule(const char* phase, const Schedule* schedule,
                      const SourcePositionTable* positions,
                      const InstructionSequence* instructions);
-  void PrintLiveRanges(const char* phase,
-                       const TopTierRegisterAllocationData* data);
+  void PrintLiveRanges(const char* phase, const RegisterAllocationData* data);
   Zone* zone() const { return zone_; }
 
  private:
@@ -754,8 +793,8 @@ void GraphC1Visualizer::PrintSchedule(const char* phase,
   }
 }
 
-void GraphC1Visualizer::PrintLiveRanges(
-    const char* phase, const TopTierRegisterAllocationData* data) {
+void GraphC1Visualizer::PrintLiveRanges(const char* phase,
+                                        const RegisterAllocationData* data) {
   Tag tag(this, "intervals");
   PrintStringProperty("name", phase);
 
@@ -826,16 +865,15 @@ void GraphC1Visualizer::PrintLiveRange(const LiveRange* range, const char* type,
     os_ << " " << parent->vreg() << ":" << parent->relative_id();
 
     // TODO(herhut) Find something useful to print for the hint field
-    if (range->get_bundle() != nullptr) {
-      os_ << " B" << range->get_bundle()->id();
+    if (parent->get_bundle() != nullptr) {
+      os_ << " B" << parent->get_bundle()->id();
     } else {
       os_ << " unknown";
     }
 
-    for (const UseInterval* interval = range->first_interval();
-         interval != nullptr; interval = interval->next()) {
-      os_ << " [" << interval->start().value() << ", "
-          << interval->end().value() << "[";
+    for (const UseInterval& interval : range->intervals()) {
+      os_ << " [" << interval.start().value() << ", " << interval.end().value()
+          << "[";
     }
 
     for (const UsePosition* pos : range->positions()) {
@@ -868,14 +906,9 @@ std::ostream& operator<<(std::ostream& os, const AsC1V& ac) {
 
 std::ostream& operator<<(std::ostream& os,
                          const AsC1VRegisterAllocationData& ac) {
-  // TODO(rmcilroy): Add support for fast register allocator.
-  if (ac.data_->type() == RegisterAllocationData::kTopTier) {
-    AccountingAllocator allocator;
-    Zone tmp_zone(&allocator, ZONE_NAME);
-    GraphC1Visualizer(os, &tmp_zone)
-        .PrintLiveRanges(ac.phase_,
-                         TopTierRegisterAllocationData::cast(ac.data_));
-  }
+  AccountingAllocator allocator;
+  Zone tmp_zone(&allocator, ZONE_NAME);
+  GraphC1Visualizer(os, &tmp_zone).PrintLiveRanges(ac.phase_, ac.data_);
   return os;
 }
 
@@ -1042,14 +1075,13 @@ std::ostream& operator<<(std::ostream& os,
 
   os << ",\"intervals\":[";
   bool first = true;
-  for (const UseInterval* interval = range.first_interval();
-       interval != nullptr; interval = interval->next()) {
+  for (const UseInterval& interval : range.intervals()) {
     if (first) {
       first = false;
     } else {
       os << ",";
     }
-    os << "[" << interval->start().value() << "," << interval->end().value()
+    os << "[" << interval.start().value() << "," << interval.end().value()
        << "]";
   }
 
@@ -1086,12 +1118,11 @@ std::ostream& operator<<(
       os << LiveRangeAsJSON{*child, top_level_live_range_json.code_};
       // Record the minimum and maximum positions observed within this
       // TopLevelLiveRange
-      for (const UseInterval* interval = child->first_interval();
-           interval != nullptr; interval = interval->next()) {
-        if (interval->start().value() < instruction_range[0])
-          instruction_range[0] = interval->start().value();
-        if (interval->end().value() > instruction_range[1])
-          instruction_range[1] = interval->end().value();
+      for (const UseInterval& interval : child->intervals()) {
+        if (interval.start().value() < instruction_range[0])
+          instruction_range[0] = interval.start().value();
+        if (interval.end().value() > instruction_range[1])
+          instruction_range[1] = interval.end().value();
       }
     }
   }
@@ -1126,22 +1157,12 @@ void PrintTopLevelLiveRanges(std::ostream& os,
 
 std::ostream& operator<<(std::ostream& os,
                          const RegisterAllocationDataAsJSON& ac) {
-  if (ac.data_.type() == RegisterAllocationData::kTopTier) {
-    const TopTierRegisterAllocationData& ac_data =
-        TopTierRegisterAllocationData::cast(ac.data_);
-    os << "\"fixed_double_live_ranges\": ";
-    PrintTopLevelLiveRanges(os, ac_data.fixed_double_live_ranges(), ac.code_);
-    os << ",\"fixed_live_ranges\": ";
-    PrintTopLevelLiveRanges(os, ac_data.fixed_live_ranges(), ac.code_);
-    os << ",\"live_ranges\": ";
-    PrintTopLevelLiveRanges(os, ac_data.live_ranges(), ac.code_);
-  } else {
-    // TODO(rmcilroy): Add support for fast register allocation data. For now
-    // output the expected fields to keep Turbolizer happy.
-    os << "\"fixed_double_live_ranges\": {}";
-    os << ",\"fixed_live_ranges\": {}";
-    os << ",\"live_ranges\": {}";
-  }
+  os << "\"fixed_double_live_ranges\": ";
+  PrintTopLevelLiveRanges(os, ac.data_.fixed_double_live_ranges(), ac.code_);
+  os << ",\"fixed_live_ranges\": ";
+  PrintTopLevelLiveRanges(os, ac.data_.fixed_live_ranges(), ac.code_);
+  os << ",\"live_ranges\": ";
+  PrintTopLevelLiveRanges(os, ac.data_.live_ranges(), ac.code_);
   return os;
 }
 

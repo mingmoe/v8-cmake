@@ -32,17 +32,13 @@ class JSPromise
     : public TorqueGeneratedJSPromise<JSPromise, JSObjectWithEmbedderSlots> {
  public:
   // [result]: Checks that the promise is settled and returns the result.
-  inline Object result() const;
+  inline Tagged<Object> result() const;
 
   // [reactions]: Checks that the promise is pending and returns the reactions.
-  inline Object reactions() const;
+  inline Tagged<Object> reactions() const;
 
   // [has_handler]: Whether this promise has a reject handler or not.
   DECL_BOOLEAN_ACCESSORS(has_handler)
-
-  // [handled_hint]: Whether this promise will be handled by a catch
-  // block in an async function.
-  DECL_BOOLEAN_ACCESSORS(handled_hint)
 
   // [is_silent]: Whether this promise should cause the debugger to pause when
   // rejected.

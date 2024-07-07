@@ -21,6 +21,12 @@
 
 #define V8_INFINITY std::numeric_limits<double>::infinity()
 
+// AIX has jmpbuf redefined as __jmpbuf in /usr/include/sys/context.h
+// which replaces v8's jmpbuf , resulting in undefined symbol errors
+#if defined(V8_OS_AIX) && defined(jmpbuf)
+#undef jmpbuf
+#endif
+
 namespace v8 {
 
 namespace base {
@@ -101,16 +107,16 @@ namespace internal {
 #define DECOMPRESS_POINTER_BY_ADDRESSING_MODE false
 #endif
 
-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
-#define COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL true
-#else
-#define COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL false
-#endif
-
 #ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
 #define COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL true
 #else
 #define COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL false
+#endif
+
+#if COMPRESS_POINTERS_BOOL && !COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL
+#define COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL true
+#else
+#define COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL false
 #endif
 
 #if defined(V8_SHARED_RO_HEAP) &&                     \
@@ -134,21 +140,17 @@ namespace internal {
 #define V8_ENABLE_SANDBOX_BOOL false
 #endif
 
-// D8's MultiMappedAllocator is only available on Linux, and only if the sandbox
-// is not enabled.
-#if V8_OS_LINUX && !V8_ENABLE_SANDBOX_BOOL
-#define MULTI_MAPPED_ALLOCATOR_AVAILABLE true
-#else
-#define MULTI_MAPPED_ALLOCATOR_AVAILABLE false
-#endif
-
 #ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
 #else
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
 #endif
 
-#define ENABLE_SPARKPLUG true
+#ifdef V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+#define V8_MOVE_PROTOYPE_TRANSITIONS_FIRST_BOOL true
+#else
+#define V8_MOVE_PROTOYPE_TRANSITIONS_FIRST_BOOL false
+#endif
 
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
 // Set stack limit lower for ARM and ARM64 than for other architectures because:
@@ -165,6 +167,13 @@ namespace internal {
 // So we speculatively lower the ia32 limit to the ARM limit for the time
 // being. See crbug.com/1346791.
 #define V8_DEFAULT_STACK_SIZE_KB 864
+#elif V8_USE_ADDRESS_SANITIZER
+// ASan makes C++ frames consume more stack, so V8 should leave more stack
+// space available in case a C++ call happens. ClusterFuzz found a case where
+// even just 1 KB less than the default stack size would be enough (see
+// crbug.com/1486275); to be more robust towards future CF reports we'll
+// use an even lower limit.
+#define V8_DEFAULT_STACK_SIZE_KB 960
 #else
 // Slightly less than 1MB, since Windows' default stack size for
 // the main execution thread is 1MB.
@@ -250,11 +259,6 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 //    OS::DiscardSystemPages() instead of using OS::DecommitPages() or setting
 //    permissions to kNoAccess because the latter two are not allowed by the
 //    MacOS (see (2)).
-// 5) since code space page headers are allocated as RWX pages it's also
-//   necessary to switch between W^X modes when updating the data in the
-//   page headers (i.e. when marking, updating stats, wiring pages in
-//   lists, etc.). The new CodePageHeaderModificationScope class is used
-//   in the respective places. On unrelated configurations it's a no-op.
 //
 // This is applicable only to MacOS on ARM64 ("Apple M1"/Apple Silicon) which
 // has a APRR/MAP_JIT machinery for fast W^X permission switching (see
@@ -275,10 +279,18 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT false
 #endif
 
-// TODO(v8:13023): enable PKU support when we have a test coverage
+// Protect the JavaScript heap with BrowserEngineKit APIs.
+#if V8_HAS_BECORE_JIT_WRITE_PROTECT && \
+    !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
+#define V8_HEAP_USE_BECORE_JIT_WRITE_PROTECT true
+#else
+#define V8_HEAP_USE_BECORE_JIT_WRITE_PROTECT false
+#endif
+
+// Protect the JavaScript heap with memory protection keys.
 #if V8_HAS_PKU_JIT_WRITE_PROTECT && \
     !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
-#define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
+#define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT true
 #else
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
 #endif
@@ -401,6 +413,9 @@ constexpr uint32_t kDefaultMaxWasmCodeSpaceSizeMb = 32;
 constexpr uint32_t kDefaultMaxWasmCodeSpaceSizeMb = 1024;
 #endif
 
+// Align IsolateData to a most common CPU cache line size.
+constexpr size_t kIsolateDataAlignment = 64;
+
 #if V8_HOST_ARCH_64_BIT
 constexpr int kSystemPointerSizeLog2 = 3;
 constexpr intptr_t kIntptrSignBit =
@@ -410,7 +425,7 @@ constexpr bool kPlatformRequiresCodeRange = true;
     (V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64) && V8_OS_LINUX
 constexpr size_t kMaximalCodeRangeSize = 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
-#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64
+#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64
 constexpr size_t kMaximalCodeRangeSize =
     (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
                                                              : 256 * MB;
@@ -431,6 +446,10 @@ constexpr size_t kReservedCodeRangePages = 1;
 constexpr size_t kMinimumCodeRangeSize = 3 * MB;
 constexpr size_t kReservedCodeRangePages = 0;
 #endif
+
+// These constants define the total trusted space memory per process.
+constexpr size_t kMaximalTrustedRangeSize = 1 * GB;
+constexpr size_t kMinimumTrustedRangeSize = 32 * MB;
 
 #else  // V8_HOST_ARCH_64_BIT
 
@@ -525,13 +544,30 @@ static_assert(kExternalPointerSlotSize == kTaggedSize);
 static_assert(kExternalPointerSlotSize == kSystemPointerSize);
 #endif
 
-// This type defines the raw storage type for code pointers stored on V8 heap.
-constexpr int kCodePointerSlotSize = sizeof(CodePointer_t);
-#ifdef V8_CODE_POINTER_SANDBOXING
-static_assert(kCodePointerSlotSize == kTaggedSize);
+// The storage type for pointers referring to CppHeap objects stored on the V8
+// heap.
+constexpr int kCppHeapPointerSlotSize = sizeof(CppHeapPointer_t);
+#ifdef V8_COMPRESS_POINTERS
+static_assert(kCppHeapPointerSlotSize == sizeof(uint32_t));
 #else
-static_assert(kCodePointerSlotSize == kSystemPointerSize);
+static_assert(kCppHeapPointerSlotSize == kSystemPointerSize);
 #endif
+
+constexpr int kIndirectPointerSize = sizeof(IndirectPointerHandle);
+// When the sandbox is enabled, trusted pointers are implemented as indirect
+// pointers (indices into the trusted pointer table). Otherwise they are regular
+// tagged pointers.
+#ifdef V8_ENABLE_SANDBOX
+constexpr int kTrustedPointerSize = kIndirectPointerSize;
+#else
+constexpr int kTrustedPointerSize = kTaggedSize;
+#endif
+constexpr int kCodePointerSize = kTrustedPointerSize;
+
+// Pointers between trusted objects use compressed pointers with the trusted
+// space base when the sandbox is enabled. Otherwise, they are regular tagged
+// pointers. Either way, they are always kTaggedSize fields.
+constexpr int kProtectedPointerSize = kTaggedSize;
 
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
 
@@ -680,6 +716,18 @@ enum class TypeofMode { kInside, kNotInside };
 // Whether floating point registers should be saved (and restored).
 enum class SaveFPRegsMode { kIgnore, kSave };
 
+// This enum describes the ownership semantics of an indirect pointer.
+enum class IndirectPointerMode {
+  // A regular reference from one HeapObject to another one through an indirect
+  // pointer, where the referenced object should be kept alive as long as the
+  // referencing object is alive.
+  kStrong,
+  // A reference from one HeapObject to another one through an indirect pointer
+  // with custom ownership semantics. Used for example for references from
+  // JSFunctions to Code objects which follow custom weak ownership semantics.
+  kCustom
+};
+
 // Whether arguments are passed on a known stack location or through a
 // register.
 enum class ArgvMode { kStack, kRegister };
@@ -691,13 +739,20 @@ enum class CallApiCallbackMode {
   // side-effects checking by debugger.
   kGeneric,
 
-  // The following two are used for generating calls from optimized code when
-  // the target CallHandlerInfo object is known and thus the expected
-  // side-effects of the callback. These versions don't get the target
-  // function because the target function can be reconstructed from the deopt
-  // info in case exception is thrown.
-  kNoSideEffects,
-  kWithSideEffects,
+  // The following two versions are used for generating calls from optimized
+  // code. They don't need to support side effects checking because function
+  // will be deoptimized when side effects checking is enabled, and they don't
+  // get the target function because it can be reconstructed from the lazy
+  // deopt info in case exception is thrown.
+
+  // This version is used for compiling code when Isolate profiling or runtime
+  // call stats is disabled. The code that uses this version must be created
+  // with a dependency on NoProfilingProtector.
+  kOptimizedNoProfiling,
+
+  // This version contains a dynamic check for enabled profiler and it supports
+  // runtime call stats.
+  kOptimized,
 };
 
 // This constant is used as an undefined value when passing source positions.
@@ -830,8 +885,8 @@ const Address kWeakHeapObjectMask = 1 << 1;
 // for cleared weak reference.
 // Note, that real heap objects can't have lower 32 bits equal to 3 because
 // this offset belongs to page header. So, in either case it's enough to
-// compare only the lower 32 bits of a MaybeObject value in order to figure
-// out if it's a cleared reference or not.
+// compare only the lower 32 bits of a Tagged<MaybeObject> value in order to
+// figure out if it's a cleared reference or not.
 const uint32_t kClearedWeakHeapObjectLower32 = 3;
 
 // Zap-value: The value used for zapping dead objects.
@@ -859,9 +914,6 @@ constexpr uint32_t kFreeListZapValue = 0xfeed1eaf;
 constexpr int kCodeZapValue = 0xbadc0de;
 constexpr uint32_t kPhantomReferenceZap = 0xca11bac;
 
-// Page constants.
-static const intptr_t kPageAlignmentMask = (intptr_t{1} << kPageSizeBits) - 1;
-
 // On Intel architecture, cache line size is 64 bytes.
 // On ARM it may be less (32 bytes), but as far this constant is
 // used for aligning data, it doesn't hurt to align on a greater value.
@@ -871,7 +923,7 @@ static const intptr_t kPageAlignmentMask = (intptr_t{1} << kPageSizeBits) - 1;
 // If looking only at the top 32 bits, the QNaN mask is bits 19 to 30.
 constexpr uint32_t kQuietNaNHighBitsMask = 0xfff << (51 - 32);
 
-enum class HeapObjectReferenceType {
+enum class V8_EXPORT_ENUM HeapObjectReferenceType {
   WEAK,
   STRONG,
 };
@@ -895,17 +947,20 @@ class InstructionStream;
 class Code;
 class CodeSpace;
 class Context;
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
-template <typename T>
-class DirectHandle;
-#endif
 class DeclarationScope;
 class Debug;
 class DebugInfo;
 class Descriptor;
 class DescriptorArray;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+template <typename T>
+class DirectHandle;
+template <typename T>
+class DirectHandleVector;
+#endif
 class TransitionArray;
 class ExternalReference;
+class ExposedTrustedObject;
 class FeedbackVector;
 class FixedArray;
 class Foreign;
@@ -914,10 +969,15 @@ class FunctionTemplateInfo;
 class GlobalDictionary;
 template <typename T>
 class Handle;
+#ifndef V8_ENABLE_DIRECT_HANDLE
+template <typename T>
+using DirectHandle = Handle<T>;
+#endif
 class Heap;
 class HeapObject;
-class HeapObjectReference;
 class IC;
+template <typename T>
+using IndirectHandle = Handle<T>;
 class InterceptorInfo;
 class Isolate;
 class JSReceiver;
@@ -928,10 +988,29 @@ class LocalIsolate;
 class MacroAssembler;
 class Map;
 class MarkCompactCollector;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+template <typename T>
+class MaybeDirectHandle;
+#endif
 template <typename T>
 class MaybeHandle;
-class MaybeObject;
-class MemoryChunk;
+#ifndef V8_ENABLE_DIRECT_HANDLE
+template <typename T>
+using MaybeDirectHandle = MaybeHandle<T>;
+#endif
+template <typename T>
+using MaybeIndirectHandle = MaybeHandle<T>;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+class MaybeObjectDirectHandle;
+#endif
+class MaybeObjectHandle;
+#ifndef V8_ENABLE_DIRECT_HANDLE
+using MaybeObjectDirectHandle = MaybeObjectHandle;
+#endif
+using MaybeObjectIndirectHandle = MaybeObjectHandle;
+template <typename T>
+class MaybeWeak;
+class MutablePageMetadata;
 class MessageLocation;
 class ModuleScope;
 class Name;
@@ -950,7 +1029,17 @@ class CompressedObjectSlot;
 class CompressedMaybeObjectSlot;
 class CompressedMapWordSlot;
 class CompressedHeapObjectSlot;
-class V8HeapCompressionScheme;
+template <typename Cage>
+class V8HeapCompressionSchemeImpl;
+class MainCage;
+using V8HeapCompressionScheme = V8HeapCompressionSchemeImpl<MainCage>;
+#ifdef V8_ENABLE_SANDBOX
+class TrustedCage;
+using TrustedSpaceCompressionScheme = V8HeapCompressionSchemeImpl<TrustedCage>;
+#else
+// The trusted cage does not exist in this case.
+using TrustedSpaceCompressionScheme = V8HeapCompressionScheme;
+#endif
 class ExternalCodeCompressionScheme;
 template <typename CompressionScheme>
 class OffHeapCompressedObjectSlot;
@@ -975,6 +1064,15 @@ class Symbol;
 template <typename T>
 class Tagged;
 class Variable;
+namespace maglev {
+class MaglevAssembler;
+}
+namespace compiler {
+class AccessBuilder;
+}
+
+using MaybeObject = MaybeWeak<Object>;
+using HeapObjectReference = MaybeWeak<HeapObject>;
 
 // Slots are either full-pointer slots or compressed slots depending on whether
 // pointer compression is enabled or not.
@@ -998,6 +1096,12 @@ struct SlotTraits {
   using TOffHeapObjectSlot = OffHeapFullObjectSlot;
   using TInstructionStreamSlot = OffHeapFullObjectSlot;
 #endif  // V8_COMPRESS_POINTERS
+#ifdef V8_ENABLE_SANDBOX
+  using TProtectedPointerSlot =
+      OffHeapCompressedObjectSlot<TrustedSpaceCompressionScheme>;
+#else
+  using TProtectedPointerSlot = TObjectSlot;
+#endif  // V8_ENABLE_SANDBOX
 };
 
 // An ObjectSlot instance describes a kTaggedSize-sized on-heap field ("slot")
@@ -1005,12 +1109,13 @@ struct SlotTraits {
 using ObjectSlot = SlotTraits::TObjectSlot;
 
 // A MaybeObjectSlot instance describes a kTaggedSize-sized on-heap field
-// ("slot") holding MaybeObject (smi or weak heap object or strong heap object).
+// ("slot") holding Tagged<MaybeObject> (smi or weak heap object or strong heap
+// object).
 using MaybeObjectSlot = SlotTraits::TMaybeObjectSlot;
 
 // A HeapObjectSlot instance describes a kTaggedSize-sized field ("slot")
 // holding a weak or strong pointer to a heap object (think:
-// HeapObjectReference).
+// Tagged<HeapObjectReference>).
 using HeapObjectSlot = SlotTraits::THeapObjectSlot;
 
 // An OffHeapObjectSlot instance describes a kTaggedSize-sized field ("slot")
@@ -1025,6 +1130,13 @@ using OffHeapObjectSlot = SlotTraits::TOffHeapObjectSlot;
 // value for code space.
 using InstructionStreamSlot = SlotTraits::TInstructionStreamSlot;
 
+// A protected pointer is one where both the pointer itself and the pointed-to
+// object are protected from modifications by an attacker if the sandbox is
+// enabled. In practice, this means that they are pointers from one
+// TrustedObject to another TrustedObject as (only) trusted objects cannot
+// directly be manipulated by an attacker.
+using ProtectedPointerSlot = SlotTraits::TProtectedPointerSlot;
+
 using WeakSlotCallback = bool (*)(FullObjectSlot pointer);
 
 using WeakSlotCallbackWithHeap = bool (*)(Heap* heap, FullObjectSlot pointer);
@@ -1035,39 +1147,123 @@ using WeakSlotCallbackWithHeap = bool (*)(Heap* heap, FullObjectSlot pointer);
 // NOTE: SpaceIterator depends on AllocationSpace enumeration values being
 // consecutive.
 enum AllocationSpace {
-  RO_SPACE,         // Immortal, immovable and immutable objects,
-  NEW_SPACE,        // Young generation space for regular objects collected
-                    // with Scavenger/MinorMC.
-  OLD_SPACE,        // Old generation regular object space.
-  CODE_SPACE,       // Old generation code object space, marked executable.
-  SHARED_SPACE,     // Space shared between multiple isolates. Optional.
-  NEW_LO_SPACE,     // Young generation large object space.
-  LO_SPACE,         // Old generation large object space.
-  CODE_LO_SPACE,    // Old generation large code object space.
-  SHARED_LO_SPACE,  // Space shared between multiple isolates. Optional.
+  RO_SPACE,       // Immortal, immovable and immutable objects,
+  NEW_SPACE,      // Young generation space for regular objects collected
+                  // with Scavenger/MinorMS.
+  OLD_SPACE,      // Old generation regular object space.
+  CODE_SPACE,     // Old generation code object space, marked executable.
+  SHARED_SPACE,   // Space shared between multiple isolates. Optional.
+  TRUSTED_SPACE,  // Space for trusted objects. When the sandbox is enabled,
+                  // this space will be located outside of it so that objects in
+                  // it cannot directly be corrupted by an attacker.
+  SHARED_TRUSTED_SPACE,     // Trusted space but for shared objects. Optional.
+  NEW_LO_SPACE,             // Young generation large object space.
+  LO_SPACE,                 // Old generation large object space.
+  CODE_LO_SPACE,            // Old generation large code object space.
+  SHARED_LO_SPACE,          // Space shared between multiple isolates. Optional.
+  SHARED_TRUSTED_LO_SPACE,  // Like TRUSTED_SPACE but for shared large objects.
+  TRUSTED_LO_SPACE,         // Like TRUSTED_SPACE but for large objects.
 
   FIRST_SPACE = RO_SPACE,
-  LAST_SPACE = SHARED_LO_SPACE,
+  LAST_SPACE = TRUSTED_LO_SPACE,
   FIRST_MUTABLE_SPACE = NEW_SPACE,
-  LAST_MUTABLE_SPACE = SHARED_LO_SPACE,
+  LAST_MUTABLE_SPACE = TRUSTED_LO_SPACE,
   FIRST_GROWABLE_PAGED_SPACE = OLD_SPACE,
-  LAST_GROWABLE_PAGED_SPACE = SHARED_SPACE,
+  LAST_GROWABLE_PAGED_SPACE = TRUSTED_SPACE,
   FIRST_SWEEPABLE_SPACE = NEW_SPACE,
-  LAST_SWEEPABLE_SPACE = SHARED_SPACE
+  LAST_SWEEPABLE_SPACE = TRUSTED_SPACE
 };
 constexpr int kSpaceTagSize = 4;
 static_assert(FIRST_SPACE == 0);
 
+constexpr bool IsAnyCodeSpace(AllocationSpace space) {
+  return space == CODE_SPACE || space == CODE_LO_SPACE;
+}
+constexpr bool IsAnyTrustedSpace(AllocationSpace space) {
+  return space == TRUSTED_SPACE || space == TRUSTED_LO_SPACE ||
+         space == SHARED_TRUSTED_SPACE || space == SHARED_TRUSTED_LO_SPACE;
+}
+constexpr bool IsAnySharedSpace(AllocationSpace space) {
+  return space == SHARED_SPACE || space == SHARED_LO_SPACE ||
+         space == SHARED_TRUSTED_SPACE || space == SHARED_TRUSTED_LO_SPACE;
+}
+
+constexpr const char* ToString(AllocationSpace space) {
+  switch (space) {
+    case AllocationSpace::RO_SPACE:
+      return "read_only_space";
+    case AllocationSpace::NEW_SPACE:
+      return "new_space";
+    case AllocationSpace::OLD_SPACE:
+      return "old_space";
+    case AllocationSpace::CODE_SPACE:
+      return "code_space";
+    case AllocationSpace::SHARED_SPACE:
+      return "shared_space";
+    case AllocationSpace::TRUSTED_SPACE:
+      return "trusted_space";
+    case AllocationSpace::SHARED_TRUSTED_SPACE:
+      return "shared_trusted_space";
+    case AllocationSpace::NEW_LO_SPACE:
+      return "new_large_object_space";
+    case AllocationSpace::LO_SPACE:
+      return "large_object_space";
+    case AllocationSpace::CODE_LO_SPACE:
+      return "code_large_object_space";
+    case AllocationSpace::SHARED_LO_SPACE:
+      return "shared_large_object_space";
+    case AllocationSpace::SHARED_TRUSTED_LO_SPACE:
+      return "shared_trusted_large_object_space";
+    case AllocationSpace::TRUSTED_LO_SPACE:
+      return "trusted_large_object_space";
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, AllocationSpace space) {
+  return os << ToString(space);
+}
+
 enum class AllocationType : uint8_t {
-  kYoung,  // Regular object allocated in NEW_SPACE or NEW_LO_SPACE
-  kOld,    // Regular object allocated in OLD_SPACE or LO_SPACE
-  kCode,   // InstructionStream object allocated in CODE_SPACE or CODE_LO_SPACE
-  kMap,    // Map object allocated in OLD_SPACE
-  kReadOnly,   // Object allocated in RO_SPACE
-  kSharedOld,  // Regular object allocated in OLD_SPACE in the shared heap
-  kSharedMap,  // Map object in OLD_SPACE in the shared heap
+  kYoung,  // Regular object allocated in NEW_SPACE or NEW_LO_SPACE.
+  kOld,    // Regular object allocated in OLD_SPACE or LO_SPACE.
+  kCode,   // InstructionStream object allocated in CODE_SPACE or CODE_LO_SPACE.
+  kMap,    // Map object allocated in OLD_SPACE.
+  kReadOnly,       // Object allocated in RO_SPACE.
+  kSharedOld,      // Regular object allocated in OLD_SPACE in the shared heap.
+  kSharedMap,      // Map object in OLD_SPACE in the shared heap.
+  kSharedTrusted,  // Trusted objects in TRUSTED_SPACE in the shared heap.
+  kTrusted,        // Object allocated in TRUSTED_SPACE or TRUSTED_LO_SPACE.
 };
 
+constexpr const char* ToString(AllocationType kind) {
+  switch (kind) {
+    case AllocationType::kYoung:
+      return "Young";
+    case AllocationType::kOld:
+      return "Old";
+    case AllocationType::kCode:
+      return "Code";
+    case AllocationType::kMap:
+      return "Map";
+    case AllocationType::kReadOnly:
+      return "ReadOnly";
+    case AllocationType::kSharedOld:
+      return "SharedOld";
+    case AllocationType::kSharedMap:
+      return "SharedMap";
+    case AllocationType::kTrusted:
+      return "Trusted";
+    case AllocationType::kSharedTrusted:
+      return "SharedTrusted";
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, AllocationType type) {
+  return os << ToString(type);
+}
+
+// Reason for a garbage collection.
+//
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused. If you add new items here, update
 // src/tools/metrics/histograms/enums.xml in chromium.
@@ -1098,38 +1294,86 @@ enum class GarbageCollectionReason : int {
   kGlobalAllocationLimit = 23,
   kMeasureMemory = 24,
   kBackgroundAllocationFailure = 25,
-  kFinalizeMinorMC = 26,
+  kFinalizeConcurrentMinorMS = 26,
   kCppHeapAllocationFailure = 27,
 
-  kLastReason = kCppHeapAllocationFailure,
+  NUM_REASONS,
 };
 
 static_assert(kGarbageCollectionReasonMaxValue ==
-                  static_cast<int>(GarbageCollectionReason::kLastReason),
+                  static_cast<int>(GarbageCollectionReason::NUM_REASONS) - 1,
               "The value of kGarbageCollectionReasonMaxValue is inconsistent.");
+
+constexpr const char* ToString(GarbageCollectionReason reason) {
+  switch (reason) {
+    case GarbageCollectionReason::kAllocationFailure:
+      return "allocation failure";
+    case GarbageCollectionReason::kAllocationLimit:
+      return "allocation limit";
+    case GarbageCollectionReason::kContextDisposal:
+      return "context disposal";
+    case GarbageCollectionReason::kCountersExtension:
+      return "counters extension";
+    case GarbageCollectionReason::kDebugger:
+      return "debugger";
+    case GarbageCollectionReason::kDeserializer:
+      return "deserialize";
+    case GarbageCollectionReason::kExternalMemoryPressure:
+      return "external memory pressure";
+    case GarbageCollectionReason::kFinalizeMarkingViaStackGuard:
+      return "finalize incremental marking via stack guard";
+    case GarbageCollectionReason::kFinalizeMarkingViaTask:
+      return "finalize incremental marking via task";
+    case GarbageCollectionReason::kFullHashtable:
+      return "full hash-table";
+    case GarbageCollectionReason::kHeapProfiler:
+      return "heap profiler";
+    case GarbageCollectionReason::kTask:
+      return "task";
+    case GarbageCollectionReason::kLastResort:
+      return "last resort";
+    case GarbageCollectionReason::kLowMemoryNotification:
+      return "low memory notification";
+    case GarbageCollectionReason::kMakeHeapIterable:
+      return "make heap iterable";
+    case GarbageCollectionReason::kMemoryPressure:
+      return "memory pressure";
+    case GarbageCollectionReason::kMemoryReducer:
+      return "memory reducer";
+    case GarbageCollectionReason::kRuntime:
+      return "runtime";
+    case GarbageCollectionReason::kSamplingProfiler:
+      return "sampling profiler";
+    case GarbageCollectionReason::kSnapshotCreator:
+      return "snapshot creator";
+    case GarbageCollectionReason::kTesting:
+      return "testing";
+    case GarbageCollectionReason::kExternalFinalize:
+      return "external finalize";
+    case GarbageCollectionReason::kGlobalAllocationLimit:
+      return "global allocation limit";
+    case GarbageCollectionReason::kMeasureMemory:
+      return "measure memory";
+    case GarbageCollectionReason::kUnknown:
+      return "unknown";
+    case GarbageCollectionReason::kBackgroundAllocationFailure:
+      return "background allocation failure";
+    case GarbageCollectionReason::kFinalizeConcurrentMinorMS:
+      return "finalize concurrent MinorMS";
+    case GarbageCollectionReason::kCppHeapAllocationFailure:
+      return "CppHeap allocation failure";
+    case GarbageCollectionReason::NUM_REASONS:
+      UNREACHABLE();
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os,
+                                GarbageCollectionReason reason) {
+  return os << ToString(reason);
+}
 
 inline size_t hash_value(AllocationType kind) {
   return static_cast<uint8_t>(kind);
-}
-
-inline std::ostream& operator<<(std::ostream& os, AllocationType kind) {
-  switch (kind) {
-    case AllocationType::kYoung:
-      return os << "Young";
-    case AllocationType::kOld:
-      return os << "Old";
-    case AllocationType::kCode:
-      return os << "Code";
-    case AllocationType::kMap:
-      return os << "Map";
-    case AllocationType::kReadOnly:
-      return os << "ReadOnly";
-    case AllocationType::kSharedOld:
-      return os << "SharedOld";
-    case AllocationType::kSharedMap:
-      return os << "SharedMap";
-  }
-  UNREACHABLE();
 }
 
 inline constexpr bool IsSharedAllocationType(AllocationType kind) {
@@ -1155,20 +1399,33 @@ enum AllocationAlignment {
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
-enum class AllowLargeObjects { kFalse, kTrue };
-
 enum MinimumCapacity {
   USE_DEFAULT_MINIMUM_CAPACITY,
   USE_CUSTOM_MINIMUM_CAPACITY
 };
 
-enum class GarbageCollector { SCAVENGER, MARK_COMPACTOR, MINOR_MARK_COMPACTOR };
+enum class GarbageCollector { SCAVENGER, MARK_COMPACTOR, MINOR_MARK_SWEEPER };
+
+constexpr const char* ToString(GarbageCollector collector) {
+  switch (collector) {
+    case GarbageCollector::SCAVENGER:
+      return "Scavenger";
+    case GarbageCollector::MARK_COMPACTOR:
+      return "Mark-Sweep-Compact";
+    case GarbageCollector::MINOR_MARK_SWEEPER:
+      return "Minor Mark-Sweep";
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, GarbageCollector collector) {
+  return os << ToString(collector);
+}
 
 enum class CompactionSpaceKind {
   kNone,
   kCompactionSpaceForScavenge,
   kCompactionSpaceForMarkCompact,
-  kCompactionSpaceForMinorMarkCompact,
+  kCompactionSpaceForMinorMarkSweep,
 };
 
 enum Executability { NOT_EXECUTABLE, EXECUTABLE };
@@ -1181,7 +1438,16 @@ enum class CodeFlushMode {
   kStressFlushCode,
 };
 
-enum ExternalBackingStoreType { kArrayBuffer, kExternalString, kNumTypes };
+enum class ExternalBackingStoreType {
+  kArrayBuffer,
+  kExternalString,
+  kNumValues
+};
+
+enum class NewJSObjectType : uint8_t {
+  kNoAPIWrapper,
+  kAPIWrapper,
+};
 
 bool inline IsBaselineCodeFlushingEnabled(base::EnumSet<CodeFlushMode> mode) {
   return mode.contains(CodeFlushMode::kFlushBaselineCode);
@@ -1389,7 +1655,9 @@ enum class BranchHint : uint8_t { kNone, kTrue, kFalse };
 enum class ConvertReceiverMode : unsigned {
   kNullOrUndefined,     // Guaranteed to be null or undefined.
   kNotNullOrUndefined,  // Guaranteed to never be null or undefined.
-  kAny                  // No specific knowledge about receiver.
+  kAny,                 // No specific knowledge about receiver.
+
+  kLast = kAny
 };
 
 inline size_t hash_value(ConvertReceiverMode mode) {
@@ -1504,6 +1772,7 @@ constexpr uint64_t kHoleNanInt64 =
 
 // ES6 section 20.1.2.6 Number.MAX_SAFE_INTEGER
 constexpr uint64_t kMaxSafeIntegerUint64 = 9007199254740991;  // 2^53-1
+static_assert(kMaxSafeIntegerUint64 == (uint64_t{1} << 53) - 1);
 constexpr double kMaxSafeInteger = static_cast<double>(kMaxSafeIntegerUint64);
 // ES6 section 21.1.2.8 Number.MIN_SAFE_INTEGER
 constexpr double kMinSafeInteger = -kMaxSafeInteger;
@@ -1515,7 +1784,10 @@ enum class VariableMode : uint8_t {
   // User declared variables:
   kLet,  // declared via 'let' declarations (first lexical)
 
-  kConst,  // declared via 'const' declarations (last lexical)
+  kConst,  // declared via 'const' declarations
+
+  kUsing,  // declared via 'using' declaration for explicit memory management
+           // (last lexical)
 
   kVar,  // declared via 'var', and 'function' declarations
 
@@ -1554,7 +1826,7 @@ enum class VariableMode : uint8_t {
   kPrivateGetterAndSetter,  // Does not coexist with any other variable with the
                             // same name in the same scope.
 
-  kLastLexicalVariableMode = kConst,
+  kLastLexicalVariableMode = kUsing,
 };
 
 // Printing support
@@ -1583,6 +1855,8 @@ inline const char* VariableMode2String(VariableMode mode) {
       return "DYNAMIC_LOCAL";
     case VariableMode::kTemporary:
       return "TEMPORARY";
+    case VariableMode::kUsing:
+      return "USING";
   }
   UNREACHABLE();
 }
@@ -1625,8 +1899,12 @@ inline bool IsSerializableVariableMode(VariableMode mode) {
          IsPrivateMethodOrAccessorVariableMode(mode);
 }
 
-inline bool IsConstVariableMode(VariableMode mode) {
-  return mode == VariableMode::kConst ||
+inline bool IsImmutableLexicalVariableMode(VariableMode mode) {
+  return mode == VariableMode::kConst || mode == VariableMode::kUsing;
+}
+
+inline bool IsImmutableLexicalOrPrivateVariableMode(VariableMode mode) {
+  return IsImmutableLexicalVariableMode(mode) ||
          IsPrivateMethodOrAccessorVariableMode(mode);
 }
 
@@ -1762,6 +2040,8 @@ class BinaryOperationFeedback {
     kString = 0x10,
     kBigInt64 = 0x20,
     kBigInt = 0x60,
+    kStringWrapper = 0x80,
+    kStringOrStringWrapper = 0x90,
     kAny = 0x7F
   };
 };
@@ -1913,6 +2193,7 @@ enum ExternalArrayType {
   kExternalUint16Array,
   kExternalInt32Array,
   kExternalUint32Array,
+  kExternalFloat16Array,
   kExternalFloat32Array,
   kExternalFloat64Array,
   kExternalUint8ClampedArray,
@@ -1997,6 +2278,31 @@ inline std::ostream& operator<<(std::ostream& os, TieringState marker) {
 
 #undef TIERING_STATE_LIST
 
+// State machine:
+// S(tate)0: kPending
+// S1: kEarlyMaglev
+// S2: kEarlyTurbofan
+// S3: kNormal
+//
+// C(ondition)0: maglev compile
+// C1: ic was stable early
+// C2: turbofan compile
+// C3: ic change or deopt
+//
+// S0 -- C0 -- C1 --> S1 -- C2 -- C3 --> S2 --|
+//             |      |                       |
+//             |      |-----------------------|
+//             |                 |
+//             |                 C3
+//             |                 |
+//             |-----------------------> S3
+enum class CachedTieringDecision : int32_t {
+  kPending,
+  kEarlyMaglev,
+  kEarlyTurbofan,
+  kNormal,
+};
+
 enum class SpeculationMode { kAllowSpeculation, kDisallowSpeculation };
 enum class CallFeedbackContent { kTarget, kReceiver };
 
@@ -2049,14 +2355,15 @@ enum class AliasingKind {
   C(CEntryFP, c_entry_fp)                                           \
   C(CFunction, c_function)                                          \
   C(Context, context)                                               \
-  C(PendingException, pending_exception)                            \
+  C(Exception, exception)                                           \
+  C(TopmostScriptHavingContext, topmost_script_having_context)      \
   C(PendingHandlerContext, pending_handler_context)                 \
   C(PendingHandlerEntrypoint, pending_handler_entrypoint)           \
   C(PendingHandlerConstantPool, pending_handler_constant_pool)      \
   C(PendingHandlerFP, pending_handler_fp)                           \
   C(PendingHandlerSP, pending_handler_sp)                           \
   C(NumFramesAbovePendingHandler, num_frames_above_pending_handler) \
-  C(ExternalCaughtException, external_caught_exception)             \
+  C(IsOnCentralStackFlag, is_on_central_stack_flag)                 \
   C(JSEntrySP, js_entry_sp)
 
 enum IsolateAddressId {
@@ -2086,35 +2393,88 @@ enum IsolateAddressId {
   V(TrapArrayTooLarge)             \
   V(TrapStringOffsetOutOfBounds)
 
-enum KeyedAccessLoadMode {
-  STANDARD_LOAD,
-  LOAD_IGNORE_OUT_OF_BOUNDS,
+enum class KeyedAccessLoadMode {
+  kInBounds = 0b00,
+  kHandleOOB = 0b01,
+  kHandleHoles = 0b10,
+  kHandleOOBAndHoles = 0b11,
 };
 
-enum KeyedAccessStoreMode {
-  STANDARD_STORE,
-  STORE_AND_GROW_HANDLE_COW,
-  STORE_IGNORE_OUT_OF_BOUNDS,
-  STORE_HANDLE_COW
+inline KeyedAccessLoadMode CreateKeyedAccessLoadMode(bool handle_oob,
+                                                     bool handle_holes) {
+  return static_cast<KeyedAccessLoadMode>(
+      static_cast<int>(handle_oob) | (static_cast<int>(handle_holes) << 1));
+}
+
+inline KeyedAccessLoadMode GeneralizeKeyedAccessLoadMode(
+    KeyedAccessLoadMode mode1, KeyedAccessLoadMode mode2) {
+  using T = std::underlying_type<KeyedAccessLoadMode>::type;
+  return static_cast<KeyedAccessLoadMode>(static_cast<T>(mode1) |
+                                          static_cast<T>(mode2));
+}
+
+inline bool LoadModeHandlesOOB(KeyedAccessLoadMode load_mode) {
+  using T = std::underlying_type<KeyedAccessLoadMode>::type;
+  return (static_cast<T>(load_mode) &
+          static_cast<T>(KeyedAccessLoadMode::kHandleOOB)) != 0;
+}
+
+inline bool LoadModeHandlesHoles(KeyedAccessLoadMode load_mode) {
+  using T = std::underlying_type<KeyedAccessLoadMode>::type;
+  return (static_cast<T>(load_mode) &
+          static_cast<T>(KeyedAccessLoadMode::kHandleHoles)) != 0;
+}
+
+enum class KeyedAccessStoreMode {
+  kInBounds,
+  kGrowAndHandleCOW,
+  kIgnoreTypedArrayOOB,
+  kHandleCOW,
 };
+
+inline std::ostream& operator<<(std::ostream& os, KeyedAccessStoreMode mode) {
+  switch (mode) {
+    case KeyedAccessStoreMode::kInBounds:
+      return os << "kInBounds";
+    case KeyedAccessStoreMode::kGrowAndHandleCOW:
+      return os << "kGrowAndHandleCOW";
+    case KeyedAccessStoreMode::kIgnoreTypedArrayOOB:
+      return os << "kIgnoreTypedArrayOOB";
+    case KeyedAccessStoreMode::kHandleCOW:
+      return os << "kHandleCOW";
+  }
+  UNREACHABLE();
+}
 
 enum MutableMode { MUTABLE, IMMUTABLE };
 
-inline bool IsCOWHandlingStoreMode(KeyedAccessStoreMode store_mode) {
-  return store_mode == STORE_HANDLE_COW ||
-         store_mode == STORE_AND_GROW_HANDLE_COW;
+inline bool StoreModeIsInBounds(KeyedAccessStoreMode store_mode) {
+  return store_mode == KeyedAccessStoreMode::kInBounds;
 }
 
-inline bool IsGrowStoreMode(KeyedAccessStoreMode store_mode) {
-  return store_mode == STORE_AND_GROW_HANDLE_COW;
+inline bool StoreModeHandlesCOW(KeyedAccessStoreMode store_mode) {
+  return store_mode == KeyedAccessStoreMode::kHandleCOW ||
+         store_mode == KeyedAccessStoreMode::kGrowAndHandleCOW;
+}
+
+inline bool StoreModeSupportsTypeArray(KeyedAccessStoreMode store_mode) {
+  return store_mode == KeyedAccessStoreMode::kInBounds ||
+         store_mode == KeyedAccessStoreMode::kIgnoreTypedArrayOOB;
+}
+
+inline bool StoreModeIgnoresTypeArrayOOB(KeyedAccessStoreMode store_mode) {
+  return store_mode == KeyedAccessStoreMode::kIgnoreTypedArrayOOB;
+}
+
+inline bool StoreModeCanGrow(KeyedAccessStoreMode store_mode) {
+  return store_mode == KeyedAccessStoreMode::kGrowAndHandleCOW;
 }
 
 enum class IcCheckType { kElement, kProperty };
 
 // Helper stubs can be called in different ways depending on where the target
 // code is located and how the call sequence is expected to look like:
-//  - CodeObject: Call on-heap {Code} object via
-//  {RelocInfo::CODE_TARGET}.
+//  - CodeObject: Call on-heap {Code} object via {RelocInfo::CODE_TARGET}.
 //  - WasmRuntimeStub: Call native {WasmCode} stub via
 //    {RelocInfo::WASM_STUB_CALL}.
 //  - BuiltinPointer: Call a builtin based on a builtin pointer with dynamic
@@ -2150,6 +2510,7 @@ inline constexpr int JSParameterCount(int param_count_without_receiver) {
 // The constant is defined here for accessibility (without having to include TF
 // internals), even though it is mostly relevant to Turbofan.
 constexpr int kJSCallClosureParameterIndex = -1;
+constexpr int kMinParameterIndex = kJSCallClosureParameterIndex;
 
 // Opaque data type for identifying stack frames. Used extensively
 // by the debugger.

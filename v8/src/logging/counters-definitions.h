@@ -13,9 +13,8 @@ namespace internal {
 // Generic range histograms.
 // HR(name, caption, min, max, num_buckets)
 #define HISTOGRAM_RANGE_LIST(HR)                                               \
-  HR(code_cache_reject_reason, V8.CodeCacheRejectReason, 1, 6, 6)              \
+  HR(code_cache_reject_reason, V8.CodeCacheRejectReason, 1, 9, 9)              \
   HR(errors_thrown_per_context, V8.ErrorsThrownPerContext, 0, 200, 20)         \
-  HR(debug_feature_usage, V8.DebugFeatureUsage, 1, 7, 7)                       \
   HR(incremental_marking_reason, V8.GCIncrementalMarkingReason, 0,             \
      kGarbageCollectionReasonMaxValue, kGarbageCollectionReasonMaxValue + 1)   \
   HR(incremental_marking_sum, V8.GCIncrementalMarkingSum, 0, 10000, 101)       \
@@ -30,7 +29,6 @@ namespace internal {
   HR(gc_finalize_sweep, V8.GCFinalizeMC.Sweep, 0, 10000, 101)                  \
   HR(gc_scavenger_scavenge_main, V8.GCScavenger.ScavengeMain, 0, 10000, 101)   \
   HR(gc_scavenger_scavenge_roots, V8.GCScavenger.ScavengeRoots, 0, 10000, 101) \
-  HR(gc_marking_sum, V8.GCMarkingSum, 0, 10000, 101)                           \
   /* Asm/Wasm. */                                                              \
   HR(wasm_functions_per_asm_module, V8.WasmFunctionsPerModule.asm, 1, 1000000, \
      51)                                                                       \
@@ -47,8 +45,6 @@ namespace internal {
      100 * KB, GB, 51)                                                         \
   HR(wasm_asm_module_size_bytes, V8.WasmModuleSizeBytes.asm, 1, GB, 51)        \
   HR(wasm_wasm_module_size_bytes, V8.WasmModuleSizeBytes.wasm, 1, GB, 51)      \
-  HR(wasm_compile_function_peak_memory_bytes,                                  \
-     V8.WasmCompileFunctionPeakMemoryBytes, 1, GB, 51)                         \
   HR(wasm_compile_huge_function_peak_memory_bytes,                             \
      V8.WasmCompileHugeFunctionPeakMemoryBytes, 1, GB, 51)                     \
   HR(asm_module_size_bytes, V8.AsmModuleSizeBytes, 1, GB, 51)                  \
@@ -56,13 +52,20 @@ namespace internal {
      21)                                                                       \
   HR(wasm_memory_allocation_result, V8.WasmMemoryAllocationResult, 0, 3, 4)    \
   /* Committed code size per module, collected on GC. */                       \
+  /* Older histogram, in MiB (0..1024MB). */                                   \
   HR(wasm_module_code_size_mb, V8.WasmModuleCodeSizeMiB, 0, 1024, 64)          \
+  /* Newer histogram, in KiB (0..100MB). */                                    \
+  HR(wasm_module_code_size_kb, V8.WasmModuleCodeSizeKiB, 0, 1024 * 100, 101)   \
   /* Percent of freed code size per module, collected on GC. */                \
   HR(wasm_module_freed_code_size_percent, V8.WasmModuleCodeSizePercentFreed,   \
      0, 100, 32)                                                               \
   /* Number of code GCs triggered per native module, collected on code GC. */  \
   HR(wasm_module_num_triggered_code_gcs,                                       \
      V8.WasmModuleNumberOfCodeGCsTriggered, 1, 128, 20)                        \
+  /* The amount of Liftoff code flushed on emergency GCs for allocations and   \
+   * on memory pressure. */                                                    \
+  HR(wasm_flushed_liftoff_code_size_bytes, V8.WasmFlushedLiftoffCodeSizeBytes, \
+     0, GB, 101)                                                               \
   /* Number of code spaces reserved per wasm module. */                        \
   HR(wasm_module_num_code_spaces, V8.WasmModuleNumberOfCodeSpaces, 1, 128, 20) \
   /* Number of live modules per isolate. */                                    \
@@ -74,12 +77,6 @@ namespace internal {
   /* Support for PKEYs/PKU by testing result of pkey_alloc(). */               \
   HR(wasm_memory_protection_keys_support, V8.WasmMemoryProtectionKeysSupport,  \
      0, 1, 2)                                                                  \
-  /* Number of thrown exceptions per isolate. */                               \
-  HR(wasm_throw_count, V8.WasmThrowCount, 0, 100000, 30)                       \
-  /* Number of rethrown exceptions per isolate. */                             \
-  HR(wasm_rethrow_count, V8.WasmReThrowCount, 0, 100000, 30)                   \
-  /* Number of caught exceptions per isolate. */                               \
-  HR(wasm_catch_count, V8.WasmCatchCount, 0, 100000, 30)                       \
   /* Ticks observed in a single Turbofan compilation, in 1K. */                \
   HR(turbofan_ticks, V8.TurboFan1KTicks, 0, 100000, 200)                       \
   /* Backtracks observed in a single regexp interpreter execution. */          \
@@ -97,6 +94,8 @@ namespace internal {
      kMaxExternalPointers, 101)                                                \
   HR(code_pointers_count, V8.SandboxedCodePointersCount, 0, kMaxCodePointers,  \
      101)                                                                      \
+  HR(trusted_pointers_count, V8.SandboxedTrustedPointersCount, 0,              \
+     kMaxTrustedPointers, 101)                                                 \
   HR(wasm_num_lazy_compilations_5sec, V8.WasmNumLazyCompilations5Sec, 0,       \
      200000, 50)                                                               \
   HR(wasm_num_lazy_compilations_20sec, V8.WasmNumLazyCompilations20Sec, 0,     \
@@ -135,6 +134,8 @@ namespace internal {
   HT(compile_deserialize, V8.CompileDeserializeMicroSeconds, 1000000,         \
      MICROSECOND)                                                             \
   /* Snapshot. */                                                             \
+  HT(snapshot_decompress, V8.SnapshotDecompressMicroSeconds, 1000000,         \
+     MICROSECOND)                                                             \
   HT(snapshot_deserialize_rospace, V8.SnapshotDeserializeRoSpaceMicroSeconds, \
      1000000, MICROSECOND)                                                    \
   HT(snapshot_deserialize_isolate, V8.SnapshotDeserializeIsolateMicroSeconds, \
@@ -273,12 +274,6 @@ namespace internal {
      V8.WasmInstantiateModuleMicroSeconds.wasm, 10000000, MICROSECOND)         \
   HT(wasm_instantiate_asm_module_time,                                         \
      V8.WasmInstantiateModuleMicroSeconds.asm, 10000000, MICROSECOND)          \
-  HT(wasm_time_between_throws, V8.WasmTimeBetweenThrowsMilliseconds, 1000,     \
-     MILLISECOND)                                                              \
-  HT(wasm_time_between_rethrows, V8.WasmTimeBetweenRethrowsMilliseconds, 1000, \
-     MILLISECOND)                                                              \
-  HT(wasm_time_between_catch, V8.WasmTimeBetweenCatchMilliseconds, 1000,       \
-     MILLISECOND)                                                              \
   HT(wasm_lazy_compile_time, V8.WasmLazyCompileTimeMicroSeconds, 100000000,    \
      MICROSECOND)                                                              \
   HT(wasm_compile_after_deserialize,                                           \
@@ -307,6 +302,9 @@ namespace internal {
      V8.CompileScriptMicroSeconds.BackgroundThread, 1000000, MICROSECOND)      \
   HT(compile_function_on_background,                                           \
      V8.CompileFunctionMicroSeconds.BackgroundThread, 1000000, MICROSECOND)    \
+  HT(deserialize_script_on_background,                                         \
+     V8.CompileScriptMicroSeconds.ConsumeCache.BackgroundThread, 1000000,      \
+     MICROSECOND)                                                              \
   HT(wasm_max_lazy_compilation_time_5sec,                                      \
      V8.WasmMaxLazyCompilationTime5SecMilliSeconds, 5000, MILLISECOND)         \
   HT(wasm_max_lazy_compilation_time_20sec,                                     \

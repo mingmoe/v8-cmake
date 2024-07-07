@@ -353,6 +353,7 @@ class CFGBuilder : public ZoneObject {
 // JS opcodes are just like calls => fall through.
 #undef BUILD_BLOCK_JS_CASE
       case IrOpcode::kCall:
+      case IrOpcode::kFastApiCall:
         if (NodeProperties::IsExceptionalCall(node)) {
           BuildBlocksForSuccessors(node);
         }
@@ -397,6 +398,7 @@ class CFGBuilder : public ZoneObject {
 // JS opcodes are just like calls => fall through.
 #undef CONNECT_BLOCK_JS_CASE
       case IrOpcode::kCall:
+      case IrOpcode::kFastApiCall:
         if (NodeProperties::IsExceptionalCall(node)) {
           scheduler_->UpdatePlacement(node, Scheduler::kFixed);
           ConnectCall(node);
@@ -420,7 +422,7 @@ class CFGBuilder : public ZoneObject {
 
   void BuildBlocksForSuccessors(Node* node) {
     size_t const successor_cnt = node->op()->ControlOutputCount();
-    Node** successors = zone_->NewArray<Node*>(successor_cnt);
+    Node** successors = zone_->AllocateArray<Node*>(successor_cnt);
     NodeProperties::CollectControlProjections(node, successors, successor_cnt);
     for (size_t index = 0; index < successor_cnt; ++index) {
       BuildBlockForNode(successors[index]);
@@ -513,7 +515,7 @@ class CFGBuilder : public ZoneObject {
   void ConnectSwitch(Node* sw) {
     size_t const successor_count = sw->op()->ControlOutputCount();
     BasicBlock** successor_blocks =
-        zone_->NewArray<BasicBlock*>(successor_count);
+        zone_->AllocateArray<BasicBlock*>(successor_count);
     CollectSuccessorBlocks(sw, successor_blocks, successor_count);
 
     if (sw == component_entry_) {
@@ -710,7 +712,7 @@ class SpecialRPONumberer : public ZoneObject {
     return empty_;
   }
 
-  bool HasLoopBlocks() const { return loops_.size() != 0; }
+  bool HasLoopBlocks() const { return !loops_.empty(); }
 
  private:
   using Backedge = std::pair<BasicBlock*, size_t>;

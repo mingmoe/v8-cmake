@@ -184,6 +184,8 @@ class SerializationDataQueue {
 
 class Worker : public std::enable_shared_from_this<Worker> {
  public:
+  static constexpr i::ExternalPointerTag kManagedTag = i::kGenericManagedTag;
+
   explicit Worker(const char* script);
   ~Worker();
 
@@ -207,7 +209,14 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   // Start running the given worker in another thread.
   static bool StartWorkerThread(Isolate* requester,
-                                std::shared_ptr<Worker> worker);
+                                std::shared_ptr<Worker> worker,
+                                base::Thread::Priority priority);
+
+  // Enters State::kTerminated for the Worker and resets the task runner.
+  void EnterTerminatedState();
+
+  // Returns the Worker instance for this thread.
+  static Worker* GetCurrentWorker();
 
  private:
   friend class ProcessMessageTask;
@@ -227,8 +236,9 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   class WorkerThread : public base::Thread {
    public:
-    explicit WorkerThread(std::shared_ptr<Worker> worker)
-        : base::Thread(base::Thread::Options("WorkerThread")),
+    explicit WorkerThread(std::shared_ptr<Worker> worker,
+                          base::Thread::Priority priority)
+        : base::Thread(base::Thread::Options("WorkerThread", priority)),
           worker_(std::move(worker)) {}
 
     void Run() override;
@@ -239,6 +249,8 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   void ExecuteInThread();
   static void PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info);
+
+  static void SetCurrentWorker(Worker* worker);
 
   i::ParkingSemaphore out_semaphore_{0};
   SerializationDataQueue out_queue_;
@@ -262,7 +274,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
   Isolate* isolate_ = nullptr;
 
   // Only accessed by the worker thread.
-  v8::Persistent<v8::Context> context_;
+  Global<Context> context_;
 };
 
 class PerIsolateData {
@@ -277,7 +289,7 @@ class PerIsolateData {
 
   class V8_NODISCARD RealmScope {
    public:
-    explicit RealmScope(PerIsolateData* data);
+    explicit RealmScope(Isolate* isolate, const Global<Context>& context);
     ~RealmScope();
 
    private:
@@ -417,16 +429,16 @@ class ShellOptions {
   DisallowReassignment<bool> no_fail = {"no-fail", false};
   DisallowReassignment<bool> dump_counters = {"dump-counters", false};
   DisallowReassignment<bool> dump_counters_nvp = {"dump-counters-nvp", false};
+  DisallowReassignment<bool> dump_system_memory_stats = {
+      "dump-system-memory-stats", false};
   DisallowReassignment<bool> ignore_unhandled_promises = {
       "ignore-unhandled-promises", false};
   DisallowReassignment<bool> mock_arraybuffer_allocator = {
       "mock-arraybuffer-allocator", false};
   DisallowReassignment<size_t> mock_arraybuffer_allocator_limit = {
       "mock-arraybuffer-allocator-limit", 0};
-#if MULTI_MAPPED_ALLOCATOR_AVAILABLE
   DisallowReassignment<bool> multi_mapped_mock_allocator = {
       "multi-mapped-mock-allocator", false};
-#endif
   DisallowReassignment<bool> enable_inspector = {"enable-inspector", false};
   int num_isolates = 1;
   DisallowReassignment<v8::ScriptCompiler::CompileOptions, true>
@@ -443,11 +455,20 @@ class ShellOptions {
   DisallowReassignment<const char*> trace_path = {"trace-path", nullptr};
   DisallowReassignment<const char*> trace_config = {"trace-config", nullptr};
   DisallowReassignment<const char*> lcov_file = {"lcov", nullptr};
+#ifdef V8_OS_LINUX
+  // Allow linux perf to be started and stopped by performance.mark and
+  // performance.measure, respectively.
+  DisallowReassignment<bool> scope_linux_perf_to_mark_measure = {
+      "scope-linux-perf-to-mark-measure", false};
+  DisallowReassignment<int> perf_ctl_fd = {"perf-ctl-fd", -1};
+  DisallowReassignment<int> perf_ack_fd = {"perf-ack-fd", -1};
+#endif
   DisallowReassignment<bool> disable_in_process_stack_traces = {
       "disable-in-process-stack-traces", false};
   DisallowReassignment<int> read_from_tcp_port = {"read-from-tcp-port", -1};
   DisallowReassignment<bool> enable_os_system = {"enable-os-system", false};
   DisallowReassignment<bool> quiet_load = {"quiet-load", false};
+  DisallowReassignment<bool> apply_priority = {"apply-priority", true};
   DisallowReassignment<int> thread_pool_size = {"thread-pool-size", 0};
   DisallowReassignment<bool> stress_delay_tasks = {"stress-delay-tasks", false};
   std::vector<const char*> arguments;
@@ -468,14 +489,6 @@ class ShellOptions {
   DisallowReassignment<bool> wasm_trap_handler = {"wasm-trap-handler", true};
 #endif  // V8_ENABLE_WEBASSEMBLY
   DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
-#if V8_ENABLE_SANDBOX
-  DisallowReassignment<bool> enable_sandbox_crash_filter = {
-      "enable-sandbox-crash-filter", false};
-#endif  // V8_ENABLE_SANDBOX
-  DisallowReassignment<bool> throw_on_failed_access_check = {
-      "throw-on-failed-access-check", false};
-  DisallowReassignment<bool> noop_on_failed_access_check = {
-      "noop-on-failed-access-check", false};
   DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                         1 * i::MB};
 };
@@ -494,14 +507,14 @@ class Shell : public i::AllStatic {
   enum class CodeType { kFileName, kString, kFunction, kInvalid, kNone };
 
   static bool ExecuteString(Isolate* isolate, Local<String> source,
-                            Local<String> name, PrintResult print_result,
+                            Local<String> name,
                             ReportExceptions report_exceptions,
-                            ProcessMessageQueue process_message_queue);
+                            Global<Value>* out_result = nullptr);
   static bool ExecuteModule(Isolate* isolate, const char* file_name);
   static bool LoadJSON(Isolate* isolate, const char* file_name);
   static void ReportException(Isolate* isolate, Local<Message> message,
                               Local<Value> exception);
-  static void ReportException(Isolate* isolate, TryCatch* try_catch);
+  static void ReportException(Isolate* isolate, const TryCatch& try_catch);
   static MaybeLocal<String> ReadFile(Isolate* isolate, const char* name,
                                      bool should_throw = true);
   static Local<String> WasmLoadSourceMapCallback(Isolate* isolate,
@@ -514,11 +527,9 @@ class Shell : public i::AllStatic {
   static void CollectGarbage(Isolate* isolate);
   static bool EmptyMessageQueues(Isolate* isolate);
   static bool CompleteMessageLoop(Isolate* isolate);
+  static bool FinishExecuting(Isolate* isolate, const Global<Context>& context);
 
   static bool HandleUnhandledPromiseRejections(Isolate* isolate);
-
-  static void PostForegroundTask(Isolate* isolate, std::unique_ptr<Task> task);
-  static void PostBlockingBackgroundTask(std::unique_ptr<Task> task);
 
   static std::unique_ptr<SerializationData> SerializeValue(
       Isolate* isolate, Local<Value> value, Local<Value> transfer);
@@ -553,9 +564,9 @@ class Shell : public i::AllStatic {
   static void RealmDispose(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void RealmSwitch(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void RealmEval(const v8::FunctionCallbackInfo<v8::Value>& info);
-  static void RealmSharedGet(Local<String> property,
+  static void RealmSharedGet(Local<Name> property,
                              const PropertyCallbackInfo<Value>& info);
-  static void RealmSharedSet(Local<String> property, Local<Value> value,
+  static void RealmSharedSet(Local<Name> property, Local<Value> value,
                              const PropertyCallbackInfo<void>& info);
 
   static void LogGetAndStop(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -564,6 +575,7 @@ class Shell : public i::AllStatic {
 
   static void InstallConditionalFeatures(
       const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void EnableJSPI(const v8::FunctionCallbackInfo<v8::Value>& info);
 
   static void AsyncHooksCreateHook(
       const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -667,7 +679,7 @@ class Shell : public i::AllStatic {
   static MaybeLocal<Promise> HostImportModuleDynamically(
       Local<Context> context, Local<Data> host_defined_options,
       Local<Value> resource_name, Local<String> specifier,
-      Local<FixedArray> import_assertions);
+      Local<FixedArray> import_attributes);
 
   static void ModuleResolutionSuccessCallback(
       const v8::FunctionCallbackInfo<v8::Value>& info);

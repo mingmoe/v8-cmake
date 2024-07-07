@@ -4,7 +4,7 @@
 
 // Flags: --turbo-fast-api-calls --expose-fast-api
 
-load('test/mjsunit/wasm/wasm-module-builder.js');
+d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 assertThrows(() => d8.test.FastCAPI());
 const fast_c_api = new d8.test.FastCAPI();
@@ -48,17 +48,16 @@ function buildWasm(name, sig, body) {
     'test_wasm_memory',
     makeSig([kWasmI32], [kWasmI32]),
   );
-  builder
-    .addMemory(1, 1)
-    .addFunction(name, sig)
-    .addBody(body({
-      add_all_no_options,
-      add_all_no_options_mismatch,
-      add_all_nested_bound,
-      overloaded_add_all_32bit_int,
-      test_wasm_memory,
-    }))
-    .exportFunc();
+  builder.addMemory(1, 1);
+  builder.addFunction(name, sig)
+      .addBody(body({
+        add_all_no_options,
+        add_all_no_options_mismatch,
+        add_all_nested_bound,
+        overloaded_add_all_32bit_int,
+        test_wasm_memory,
+      }))
+      .exportFunc();
   const x = {};
   const module = builder.instantiate({
     fast_c_api: {

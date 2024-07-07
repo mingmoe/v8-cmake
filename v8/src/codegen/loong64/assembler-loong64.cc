@@ -135,7 +135,7 @@ MemOperand::MemOperand(Register base, int32_t offset)
 MemOperand::MemOperand(Register base, Register index)
     : base_(base), index_(index), offset_(0) {}
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
   for (auto& request : heap_number_requests_) {
     Handle<HeapObject> object;
@@ -177,7 +177,10 @@ Assembler::Assembler(const AssemblerOptions& options,
   block_buffer_growth_ = false;
 }
 
-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  GetCode(isolate->main_thread_local_isolate(), desc);
+}
+void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
                         SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
@@ -358,10 +361,9 @@ bool Assembler::IsMov(Instr instr, Register rd, Register rj) {
   return instr == instr1;
 }
 
-bool Assembler::IsPcAddi(Instr instr, Register rd, int32_t si20) {
-  DCHECK(is_int20(si20));
-  Instr instr1 = PCADDI | (si20 & 0xfffff) << kRjShift | rd.code();
-  return instr == instr1;
+bool Assembler::IsPcAddi(Instr instr) {
+  uint32_t opcode = (instr >> 25) << 25;
+  return opcode == PCADDI;
 }
 
 bool Assembler::IsNop(Instr instr, unsigned int type) {
@@ -450,26 +452,23 @@ int Assembler::target_at(int pos, bool is_internal) {
     }
   }
 
-  // Check we have a branch or jump instruction.
-  DCHECK(IsBranch(instr) || IsPcAddi(instr, t8, 16));
+  // Check we have a branch, jump or pcaddi instruction.
+  DCHECK(IsBranch(instr) || IsPcAddi(instr));
   // Do NOT change this to <<2. We rely on arithmetic shifts here, assuming
   // the compiler uses arithmetic shifts for signed integers.
   if (IsBranch(instr)) {
     return AddBranchOffset(pos, instr);
-  } else {
-    DCHECK(IsPcAddi(instr, t8, 16));
-    // see BranchLong(Label* L) and BranchAndLinkLong ??
-    int32_t imm32;
-    Instr instr_lu12i_w = instr_at(pos + 1 * kInstrSize);
-    Instr instr_ori = instr_at(pos + 2 * kInstrSize);
-    DCHECK(IsLu12i_w(instr_lu12i_w));
-    imm32 = ((instr_lu12i_w >> 5) & 0xfffff) << 12;
-    imm32 |= ((instr_ori >> 10) & static_cast<int32_t>(kImm12Mask));
-    if (imm32 == kEndOfJumpChain) {
+  } else if (IsPcAddi(instr)) {
+    // see LoadLabelRelative
+    int32_t si20;
+    si20 = (instr >> kRjShift) & 0xfffff;
+    if (si20 == kEndOfJumpChain) {
       // EndOfChain sentinel is returned directly, not relative to pc or pos.
       return kEndOfChain;
     }
-    return pos + imm32;
+    return pos + (si20 << 2);
+  } else {
+    UNREACHABLE();
   }
 }
 
@@ -515,6 +514,18 @@ void Assembler::target_at_put(int pos, int target_pos, bool is_internal) {
     // Make label relative to Code pointer of generated Code object.
     instr_at_put(
         pos, target_pos + (InstructionStream::kHeaderSize - kHeapObjectTag));
+    return;
+  }
+
+  if (IsPcAddi(instr)) {
+    // For LoadLabelRelative function.
+    int32_t imm = target_pos - pos;
+    DCHECK_EQ(imm & 3, 0);
+    DCHECK(is_int22(imm));
+    uint32_t siMask = 0xfffff << kRjShift;
+    uint32_t si20 = ((imm >> 2) << kRjShift) & siMask;
+    instr = (instr & ~siMask) | si20;
+    instr_at_put(pos, instr);
     return;
   }
 
@@ -582,7 +593,7 @@ void Assembler::bind_to(Label* L, int pos) {
         target_at_put(fixup_pos, pos, false);
       } else {
         DCHECK(IsJ(instr) || IsLu12i_w(instr) || IsEmittedConstant(instr) ||
-               IsPcAddi(instr, t8, 8));
+               IsPcAddi(instr));
         target_at_put(fixup_pos, pos, false);
       }
     }

@@ -43,13 +43,15 @@ class V8_EXPORT_PRIVATE Sweeper final {
   Sweeper(const Sweeper&) = delete;
   Sweeper& operator=(const Sweeper&) = delete;
 
-  // Sweeper::Start assumes the heap holds no linear allocation buffers.
-  void Start(SweepingConfig);
+  // Starts sweeping. Assumes that the heap holds no linear allocation buffers.
+  // Will not finish sweeping in case SweepingConfig::sweeping_type is
+  // SweepingType::kAtomic but rely on the caller to finish sweeping
+  // immediately.
+  void Start(SweepingConfig, double initial_heap_limit_percent = 100);
   // Returns true when sweeping was finished and false if it was not running or
   // couldn't be finished due to being a recursive sweep call.
   bool FinishIfRunning();
   void FinishIfOutOfWork();
-  void NotifyDoneIfNeeded();
   // SweepForAllocationIfRunning sweeps the given `space` until a slot that can
   // fit an allocation of `min_wanted_size` bytes is found. Returns true if a
   // slot was found. Aborts after `max_duration`.
@@ -64,8 +66,17 @@ class V8_EXPORT_PRIVATE Sweeper final {
   bool PerformSweepOnMutatorThread(v8::base::TimeDelta max_duration,
                                    StatsCollector::ScopeId);
 
+  template <typename Callback>
+  void UpdateHeapLimitPercentageIfRunning(Callback get_heap_limit_percent) {
+    if (IsSweepingInProgress()) {
+      UpdateHeapLimitPercentageImpl(get_heap_limit_percent());
+    }
+  }
+
  private:
   void WaitForConcurrentSweepingForTesting();
+
+  void UpdateHeapLimitPercentageImpl(double heap_limit_percent);
 
   class SweeperImpl;
 

@@ -6,7 +6,6 @@
 #define V8_OBJECTS_MODULE_H_
 
 #include "include/v8-script.h"
-#include "src/objects/fixed-array.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
@@ -17,15 +16,13 @@
 namespace v8 {
 namespace internal {
 
-template <typename T>
-class Handle;
-class Isolate;
 class JSModuleNamespace;
 class SourceTextModuleDescriptor;
 class SourceTextModuleInfo;
 class SourceTextModuleInfoEntry;
-class String;
 class Zone;
+template <typename T>
+class ZoneForwardList;
 
 #include "torque-generated/src/objects/module-tq.inc"
 
@@ -51,7 +48,7 @@ class Module : public TorqueGeneratedModule<Module, HeapObject> {
   };
 
   // The exception in the case {status} is kErrored.
-  Object GetException();
+  Tagged<Object> GetException();
 
   // Returns if this module or any transitively requested module is [[Async]],
   // i.e. has a top-level await.
@@ -123,7 +120,7 @@ class Module : public TorqueGeneratedModule<Module, HeapObject> {
 
   // To set status to kErrored, RecordError should be used.
   void SetStatus(Status status);
-  void RecordError(Isolate* isolate, Object error);
+  void RecordError(Isolate* isolate, Tagged<Object> error);
 
   TQ_OBJECT_CONSTRUCTORS(Module)
 };
